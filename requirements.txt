@@ -1,0 +1,12 @@
+# Step 1 — reading and inspecting DICOM
+pydicom>=2.4
+numpy>=1.24
+pillow>=10.0        # save slices as PNG (step 2)
+
+# Step 4 — analysis engine
+# Default engine is LOCAL Ollama, reached over HTTP with the stdlib only —
+# no extra dependency required.
+#
+# anthropic>=0.40   # ONLY for the non-local Claude engine; not used by default,
+#                   # do NOT install/use for sensitive data.
+# matplotlib>=3.8   # optional, nicer visualization / montages

@@ -1,0 +1,41 @@
+# Fully local stack. Nothing leaves the machine.
+#
+#   ollama : the local model server. Weights persist in the named volume
+#            `ollama_models`, pulled at runtime (not baked into any image).
+#   app    : our pipeline. Talks to ollama over the internal network only.
+#
+# Usage:
+#   docker compose up --build          # runs manifest + analyze, writes ./output
+#   docker compose run --rm app python src/visualize.py --deep   # ad-hoc commands
+#
+# GPU: uncomment the `deploy` block under `ollama` if you have NVIDIA + toolkit.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_models:/root/.ollama       # model weights persist here
+    ports:
+      - "11434:11434"                      # optional: reach it from the host too
+    restart: unless-stopped
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  app:
+    build: .
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: llama3.2-vision
+    volumes:
+      - ./mri_test_data:/app/mri_test_data:ro   # data stays read-only
+      - ./output:/app/output                    # reports land here on the host
+
+volumes:
+  ollama_models:

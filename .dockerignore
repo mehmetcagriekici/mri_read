@@ -1,0 +1,9 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+output/
+mri_test_data/
+.git/
+.env
+*.md

@@ -1,0 +1,36 @@
+# --- Medical data: never commit (privacy + size) ---
+mri_test_data/
+*.dcm
+*.nii
+*.nii.gz
+
+# --- Generated output (montages, exported slices) ---
+output/
+
+# --- Python ---
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Secrets / config ---
+.env
+*.key
+secrets.*
+
+# --- Tooling caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
