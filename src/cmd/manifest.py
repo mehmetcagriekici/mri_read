@@ -18,7 +18,10 @@ from mri_read.paths import OUT
 
 def main() -> None:
     OUT.mkdir(exist_ok=True)
-    m = build_manifest()
+    try:
+        m = build_manifest()
+    except FileNotFoundError as e:
+        raise SystemExit(str(e)) from None
 
     s = m["study"]
     print(f"Study: {s.get('body_part')} | {s.get('manufacturer')} "

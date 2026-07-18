@@ -78,7 +78,7 @@ class OllamaVisionEngine(AnalysisEngine):
         self.host = host.rstrip("/")
         self.timeout = timeout
         if auto_pull:
-            ensure_model(self.host, self.model)        # fetch weights if missing
+            self.model = ensure_model(self.host, self.model)  # resolve to exact pulled tag
 
     # --- engine interface (implements AnalysisEngine.analyze) ---
     def analyze(self, study_meta: dict,

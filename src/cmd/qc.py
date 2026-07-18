@@ -32,7 +32,11 @@ def main() -> None:
     print(f"{'series':7} {'status':6} {'slices':>6} {'contr':>6} {'snr':>6} "
           f"{'empty':>6}  flags")
     print("-" * 78)
-    for name in list_series():
+    try:
+        names = list_series()
+    except FileNotFoundError as e:
+        raise SystemExit(str(e)) from None
+    for name in names:
         qc = run_qc(name)
         m = qc["metrics"]
         if name in by_name:

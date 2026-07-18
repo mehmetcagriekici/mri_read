@@ -2,7 +2,9 @@
 CLI entry point for Step 4 — the analysis orchestrator.
 
 All the real logic lives in mri_read.analyze; this just wires up argparse and
-the manifest.json / report.json / report.md file handling.
+the manifest.json / report.json / report.md file handling. Standalone: if
+manifest.json doesn't exist yet (or has no QC), this builds it first — you
+don't need to run manifest.py/qc.py separately first, though you still can.
 
 Usage:
   python src/cmd/analyze.py                         # local ollama, one series per sequence
@@ -17,9 +19,35 @@ import json
 
 from mri_read.analyze import select_series, write_report
 from mri_read.engine import get_engine
+from mri_read.manifest import build_manifest
 from mri_read.paths import OUT
+from mri_read.qc import run_qc
 
 MANIFEST = OUT / "manifest.json"
+
+
+def _load_or_build_manifest() -> dict:
+    """Load manifest.json, building it (and QC) first if it's missing/stale.
+
+    Makes this script a standalone "final product" command: running it alone
+    produces a report without first requiring manifest.py/qc.py runs.
+    """
+    OUT.mkdir(exist_ok=True)
+    if MANIFEST.exists():
+        manifest = json.loads(MANIFEST.read_text())
+    else:
+        print("No manifest.json yet — building it now "
+              "(equivalent to  python src/cmd/manifest.py)...")
+        manifest = build_manifest()
+        MANIFEST.write_text(json.dumps(manifest, indent=2))
+
+    if not any("qc" in r for r in manifest.get("series", [])):
+        print("Manifest has no QC yet — running it now "
+              "(equivalent to  python src/cmd/qc.py)...\n")
+        for row in manifest["series"]:
+            row["qc"] = run_qc(row["series"])
+        MANIFEST.write_text(json.dumps(manifest, indent=2))
+    return manifest
 
 
 def main() -> None:
@@ -35,12 +63,11 @@ def main() -> None:
                     help="skip series that QC flagged (needs qc in manifest)")
     args = ap.parse_args()
 
-    if not MANIFEST.exists():
-        raise SystemExit("Run  python src/cmd/manifest.py  first (need manifest.json).")
-    manifest = json.loads(MANIFEST.read_text())
+    try:
+        manifest = _load_or_build_manifest()
+    except FileNotFoundError as e:
+        raise SystemExit(str(e)) from None
     study_meta = manifest.get("study", {})
-    if not any("qc" in r for r in manifest.get("series", [])):
-        print("Note: manifest has no QC yet — run  python src/cmd/qc.py  to add it.\n")
 
     series = select_series(manifest, args.slices,
                            one_per_label=not args.all_series,

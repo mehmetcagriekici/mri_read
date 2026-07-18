@@ -39,13 +39,18 @@ SYSTEM_PROMPT = """You are orchestrating a local, research-prototype MRI-reading
 pipeline for a brain MRI study. You do not see the images yourself — you decide \
 which series are worth a detailed read and drive the pipeline via tools.
 
-Typical flow:
-1. get_manifest — see what sequences are in the study (T1, T2, FLAIR, DWI, 3D T1, \
-   reformats, localizers...) and their use_for_analysis flag.
-2. Optionally run_qc on any series you want more confidence in before including it.
-3. analyze_series with the series names worth a detailed read — usually one per \
+The study manifest (every series, its sequence type — T1, T2, FLAIR, DWI, 3D T1, \
+reformats, localizers... — and its use_for_analysis flag) is already given to you \
+in the first message below. You do not need to call get_manifest yourself.
+
+From there:
+1. Optionally run_qc on any series you want more confidence in before including it.
+2. analyze_series with the series names worth a detailed read — usually one per \
    sequence type, skipping reformats/localizers/unknowns.
-4. write_report to persist the result.
+3. write_report to persist the result.
+
+You MUST call analyze_series and then write_report before giving your final answer \
+— do not reply with a text-only answer until write_report has been called.
 
 This is a research/engineering prototype, NOT clinical care. When you are done, \
 reply with a short plain-text summary of what you found (no further tool calls)."""
@@ -216,14 +221,27 @@ def run_agent(model: str = DEFAULT_MODEL, host: str = DEFAULT_HOST,
              max_steps: int = 12, timeout: int = 900) -> tuple[str, AgentContext]:
     """Run the tool-calling agent loop to completion (or until max_steps).
 
+    Standalone: the manifest is always built up front, in code, rather than
+    left as a tool call the orchestrator model has to remember to make first
+    — small tool-calling models are unreliable about that. This guarantees
+    running `python src/cmd/agent.py` alone covers Step 3 (manifest) without
+    the user separately running manifest.py, no matter how the model behaves.
+    QC / analysis / report are still the model's calls to make via tools.
+
     Returns (final_text_summary, context) — context.last_result holds the
     AnalysisResult if analyze_series was called.
     """
-    ensure_model(host, model)                        # auto-pull, like the vision engine
+    model = ensure_model(host, model)                 # resolve to exact pulled tag
     ctx = AgentContext(engine_name=engine_name, engine_kwargs=engine_kwargs, host=host)
+    ctx.manifest = build_manifest()                    # guaranteed, not left to a tool call
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": "Read this MRI study and produce a report."},
+        {"role": "user", "content": (
+            "Read this MRI study and produce a report. Here is the manifest "
+            "(already computed for you — no need to call get_manifest):\n"
+            f"{json.dumps(ctx.manifest, default=str)}"
+        )},
     ]
 
     for _ in range(max_steps):

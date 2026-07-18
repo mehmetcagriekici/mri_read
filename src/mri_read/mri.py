@@ -312,6 +312,11 @@ def list_series() -> list[str]:
     Plain sorted() would order these as strings ("Seri10" < "Seri2"), so we key
     on the integer embedded in the name.
     """
+    if not DATA_DIR.exists():
+        raise FileNotFoundError(
+            f"No data folder at {DATA_DIR}. Place your DICOM series folders "
+            "there (see README.md 'Data') before running the pipeline."
+        )
     def key(n: str):
         d = "".join(c for c in n if c.isdigit())     # pull digits out of the name
         return int(d) if d else 10**9                # names w/o digits sort last

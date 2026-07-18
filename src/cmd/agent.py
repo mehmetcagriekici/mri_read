@@ -34,8 +34,11 @@ def main() -> None:
     OUT.mkdir(exist_ok=True)
     engine_kwargs = {"model": args.vision_model} if args.vision_model else {}
 
-    summary, ctx = run_agent(args.model, args.host, args.engine, engine_kwargs,
-                             max_steps=args.max_steps)
+    try:
+        summary, ctx = run_agent(args.model, args.host, args.engine, engine_kwargs,
+                                 max_steps=args.max_steps)
+    except FileNotFoundError as e:
+        raise SystemExit(str(e)) from None
 
     print("\n=== Agent summary ===")
     print(summary)
