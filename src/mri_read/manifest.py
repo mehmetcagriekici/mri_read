@@ -23,18 +23,12 @@ reformat (a reconstruction derived from a 3D volume, not a real acquisition).
 Each series gets {label, confidence, reason} plus a use_for_analysis flag so the
 engine only looks at real diagnostic sequences (not reformats/localizers).
 
-Usage:
-  python src/manifest.py            # print manifest + write output/manifest.json
+CLI entry point: src/cmd/manifest.py
 """
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
-from mri import inspect_series, list_series
-
-OUT = Path(__file__).resolve().parent.parent / "output"
+from mri_read.mri import inspect_series, list_series
 
 # Labels that represent real diagnostic sequences worth analyzing. Anything not
 # in this set (reformats, localizers, unknowns) is skipped by the engine.
@@ -141,29 +135,3 @@ def build_manifest() -> dict:
             },
         })
     return {"study": study, "series": series_out}
-
-
-def main() -> None:
-    """Build the manifest, print a human-readable table, and save the JSON."""
-    OUT.mkdir(exist_ok=True)
-    m = build_manifest()
-
-    s = m["study"]
-    print(f"Study: {s.get('body_part')} | {s.get('manufacturer')} "
-          f"{s.get('model')} @ {s.get('field_T')}T\n")
-    print(f"{'series':7} {'label':16} {'plane':9} {'slices':>6} {'conf':>5}  reason")
-    print("-" * 92)
-    for r in m["series"]:
-        flag = "*" if r["use_for_analysis"] else " "   # star = feeds the engine
-        print(f"{flag}{r['series']:6} {r['label']:16} {r['plane'][:9]:9} "
-              f"{r['n_slices']:>6} {r['confidence']:>5}  {r['reason']}")
-    print("\n(* = used for analysis)")
-
-    # This JSON is the contract handed to qc.py and analyze.py.
-    path = OUT / "manifest.json"
-    path.write_text(json.dumps(m, indent=2))
-    print(f"\nManifest written to: {path}")
-
-
-if __name__ == "__main__":
-    main()

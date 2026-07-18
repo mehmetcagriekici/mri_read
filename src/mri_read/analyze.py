@@ -5,29 +5,22 @@ Reads output/manifest.json, selects representative slices from the primary
 series, hands them to an engine, and writes a report. The engine is chosen by
 name (--engine) so nothing here is tied to Claude specifically.
 
-Usage:
-  python src/analyze.py                         # local ollama, one series per sequence
-  python src/analyze.py --slices 5              # more slices per series
-  python src/analyze.py --model qwen2.5vl       # pick the local vision model
+CLI entry point: src/cmd/analyze.py
 """
 
 from __future__ import annotations
 
-import argparse
 import io
 import json
-from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-from dwi import diffusion_views
-from engine import SeriesImages, get_engine
-from mri import (apply_window, foreground_fraction, load_series,
-                 volume_window_bounds)
-
-OUT = Path(__file__).resolve().parent.parent / "output"
-MANIFEST = OUT / "manifest.json"
+from mri_read.dwi import diffusion_views
+from mri_read.engine import SeriesImages
+from mri_read.mri import (apply_window, foreground_fraction, load_series,
+                          volume_window_bounds)
+from mri_read.paths import OUT
 
 
 def content_indices(volume: np.ndarray, k: int, min_fg: float = 0.05) -> list[int]:
@@ -76,6 +69,25 @@ def _dwi_images(row: dict, slices: int) -> list[SeriesImages]:
     return out
 
 
+def build_series_images(row: dict, slices: int) -> list[SeriesImages]:
+    """Build SeriesImages for one manifest row, DWI handled specially.
+
+    Shared by select_series (the fixed pipeline) and select_named_series (an
+    agent picking specific series by name) so both go through one code path.
+    """
+    if row["label"] == "DWI":
+        return _dwi_images(row, slices)
+    s = load_series(row["series"])
+    idx = content_indices(s.volume, slices)
+    return [SeriesImages(
+        series=row["series"],
+        label=row["label"],
+        plane=row.get("plane", "?"),
+        slice_indices=idx,
+        slice_pngs=volume_to_pngs(s.volume, idx),
+    )]
+
+
 def select_series(manifest: dict, slices: int, one_per_label: bool,
                   skip_qc_warn: bool):
     """Build SeriesImages for the primary series in the manifest."""
@@ -93,24 +105,27 @@ def select_series(manifest: dict, slices: int, one_per_label: bool,
                   f"{', '.join(qc.get('flags', []))}")
             continue
         seen.add(label)
-
-        if label == "DWI":
-            out.extend(_dwi_images(row, slices))
-            continue
-
-        s = load_series(row["series"])
-        idx = content_indices(s.volume, slices)
-        out.append(SeriesImages(
-            series=row["series"],
-            label=label,
-            plane=row.get("plane", "?"),
-            slice_indices=idx,
-            slice_pngs=volume_to_pngs(s.volume, idx),
-        ))
+        out.extend(build_series_images(row, slices))
     return out
 
 
-def write_report(result, study_meta: dict, series) -> None:
+def select_named_series(manifest: dict, names: list[str],
+                        slices: int) -> list[SeriesImages]:
+    """Build SeriesImages for specific series named explicitly (e.g. by an agent).
+
+    Unlike select_series, this doesn't filter by use_for_analysis/QC — the
+    caller already decided which series it wants.
+    """
+    rows = {r["series"]: r for r in manifest["series"]}
+    out = []
+    for name in names:
+        row = rows.get(name)
+        if row is not None:
+            out.extend(build_series_images(row, slices))
+    return out
+
+
+def write_report(result, study_meta: dict) -> None:
     (OUT / "report.json").write_text(json.dumps({
         "engine": result.engine,
         "study": study_meta,
@@ -149,43 +164,3 @@ def write_report(result, study_meta: dict, series) -> None:
     if result.flags:
         lines += ["", "## Flags", ""] + [f"- {f}" for f in result.flags]
     (OUT / "report.md").write_text("\n".join(lines) + "\n")
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--engine", default="ollama",
-                    help="ollama (local, default) | claude (non-local)")
-    ap.add_argument("--model", default=None, help="engine model override")
-    ap.add_argument("--slices", type=int, default=4,
-                    help="slices per series (default 4)")
-    ap.add_argument("--all-series", action="store_true",
-                    help="include every primary series, not one per sequence type")
-    ap.add_argument("--skip-qc-warn", action="store_true",
-                    help="skip series that QC flagged (needs qc in manifest)")
-    args = ap.parse_args()
-
-    if not MANIFEST.exists():
-        raise SystemExit("Run  python src/manifest.py  first (need manifest.json).")
-    manifest = json.loads(MANIFEST.read_text())
-    study_meta = manifest.get("study", {})
-    if not any("qc" in r for r in manifest.get("series", [])):
-        print("Note: manifest has no QC yet — run  python src/qc.py  to add it.\n")
-
-    series = select_series(manifest, args.slices,
-                           one_per_label=not args.all_series,
-                           skip_qc_warn=args.skip_qc_warn)
-    n_imgs = sum(len(s.slice_pngs) for s in series)
-    print(f"Selected {len(series)} series, {n_imgs} slice images. "
-          f"Calling engine '{args.engine}'...")
-
-    kwargs = {"model": args.model} if args.model else {}
-    engine = get_engine(args.engine, **kwargs)
-    result = engine.analyze(study_meta, series)
-
-    write_report(result, study_meta, series)
-    print(f"\nImpression: {result.impression}\n")
-    print(f"Report written to {OUT/'report.md'} and {OUT/'report.json'}")
-
-
-if __name__ == "__main__":
-    main()

@@ -19,10 +19,9 @@ from __future__ import annotations
 import base64
 import json
 import os
-import urllib.error
-import urllib.request
 
-from engine import AnalysisEngine, AnalysisResult, SeriesImages
+from mri_read.engine import AnalysisEngine, AnalysisResult, SeriesImages
+from mri_read.ollama_client import ensure_model, post
 
 DEFAULT_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2-vision")
@@ -79,63 +78,7 @@ class OllamaVisionEngine(AnalysisEngine):
         self.host = host.rstrip("/")
         self.timeout = timeout
         if auto_pull:
-            self._ensure_model()                     # fetch weights if missing
-
-    # --- low-level HTTP helpers (stdlib urllib only, no 'requests' dependency) ---
-    def _post(self, path: str, payload: dict, timeout: int | None = None) -> dict:
-        """POST JSON to the Ollama server and return the parsed JSON reply."""
-        req = urllib.request.Request(
-            f"{self.host}{path}",
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
-            return json.loads(r.read().decode())
-
-    def _model_present(self) -> bool:
-        """Is our model already downloaded? (GET /api/tags lists local models.)
-
-        Also doubles as the connectivity check — if Ollama is unreachable we
-        raise a clear error here rather than failing cryptically later.
-        """
-        try:
-            req = urllib.request.Request(f"{self.host}/api/tags")
-            with urllib.request.urlopen(req, timeout=15) as r:
-                tags = json.loads(r.read().decode()).get("models", [])
-            # Compare on the base name (before any ":tag") so "llama3.2-vision"
-            # matches "llama3.2-vision:latest".
-            names = {m.get("name", "").split(":")[0] for m in tags}
-            return self.model.split(":")[0] in names
-        except urllib.error.URLError as e:
-            raise RuntimeError(
-                f"Cannot reach Ollama at {self.host} ({e}). "
-                "Is the ollama server running?"
-            ) from e
-
-    def _ensure_model(self) -> None:
-        """Pull the model into the local Ollama store if it's not there yet.
-
-        This is why the Docker image stays small: weights are pulled at runtime
-        into a persistent volume, not baked into the image.
-        """
-        if self._model_present():
-            return
-        print(f"Pulling local model '{self.model}' (one-time)...")
-        # /api/pull streams progress lines; read to completion.
-        req = urllib.request.Request(
-            f"{self.host}/api/pull",
-            data=json.dumps({"name": self.model, "stream": True}).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=None) as r:
-            for line in r:
-                try:
-                    status = json.loads(line).get("status", "")
-                except json.JSONDecodeError:
-                    continue
-                if status:
-                    print(f"  {status}", end="\r")
-        print("\n  done.")
+            ensure_model(self.host, self.model)        # fetch weights if missing
 
     # --- engine interface (implements AnalysisEngine.analyze) ---
     def analyze(self, study_meta: dict,
@@ -166,12 +109,12 @@ class OllamaVisionEngine(AnalysisEngine):
         })
 
         # stream=False -> one complete reply; low temperature -> steadier JSON.
-        resp = self._post("/api/chat", {
+        resp = post(self.host, "/api/chat", {
             "model": self.model,
             "messages": messages,
             "stream": False,
             "options": {"temperature": 0.2},
-        })
+        }, self.timeout)
         text = resp.get("message", {}).get("content", "")
 
         # If the model didn't return parseable JSON, keep its raw text as the

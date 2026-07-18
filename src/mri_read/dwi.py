@@ -14,17 +14,15 @@ This module splits a DWI series by b-value and computes an ADC map when two
 b-values are available. Falls back gracefully when b-values aren't tagged.
 
 Usage (standalone check):
-  python src/dwi.py Seri1
+  python src/cmd/dwi.py Seri1
 """
 
 from __future__ import annotations
 
-import sys
-
 import numpy as np
 import pydicom
 
-from mri import DATA_DIR, _slice_position, read_bvalue
+from mri_read.mri import DATA_DIR, _slice_position, read_bvalue
 
 
 def load_by_bvalue(name: str) -> dict[float, np.ndarray]:
@@ -110,12 +108,3 @@ def diffusion_views(name: str) -> dict:
         "adc": compute_adc(by_b),
         "note": f"b-values found: {real_bs}",
     }
-
-
-if __name__ == "__main__":
-    n = sys.argv[1] if len(sys.argv) > 1 else "Seri1"
-    v = diffusion_views(n)
-    print(f"{n}: {v['note']}")
-    if v["high_b"] is not None:
-        print(f"  high-b (b={v['b_value']}) volume: {v['high_b'].shape}")
-    print(f"  ADC map: {None if v['adc'] is None else v['adc'].shape}")

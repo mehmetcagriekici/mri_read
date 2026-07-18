@@ -30,15 +30,11 @@ Nothing here talks to a network or a model — it is pure local file reading.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import numpy as np
 import pydicom
 
-# Where the data lives: <repo>/mri_test_data. __file__ is <repo>/src/mri.py, so
-# parent.parent is the repo root. Resolving keeps it correct regardless of the
-# directory the script is launched from.
-DATA_DIR = Path(__file__).resolve().parent.parent / "mri_test_data"
+from mri_read.paths import DATA_DIR
 
 
 @dataclass
@@ -291,9 +287,9 @@ _BVALUE_TAGS = [
 def read_bvalue(ds) -> float | None:
     """Best-effort diffusion b-value for one slice, or None if not tagged.
 
-    Checks the standard tag then GE private tags. GE occasionally stores the
-    b-value as a large packed integer (e.g. 1000000000 encoding b=1000), so we
-    unpack values above 100000 with a modulo.
+    Checks the standard tag then GE private tags. GE occasionally packs the
+    b-value into the low 5 digits of a larger slop integer (e.g. 1000001000
+    encodes b=1000), so we unpack values above 100000 with a modulo.
     """
     for group, elem in _BVALUE_TAGS:
         if (group, elem) in ds:                      # tag present in this file?

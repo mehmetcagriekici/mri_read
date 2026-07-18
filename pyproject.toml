@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mri-read"
+version = "0.1.0"
+description = "MRI DICOM reading/analysis pipeline"
+requires-python = ">=3.11"
+# Runtime dependencies are pinned in requirements.txt (the single source of
+# truth for versions); this package declares none of its own so `pip install
+# -e .` only registers the mri_read package location, it never installs deps.
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["mri_read*"]

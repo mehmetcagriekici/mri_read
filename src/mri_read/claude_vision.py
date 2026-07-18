@@ -18,7 +18,8 @@ import base64
 import json
 import os
 
-from engine import AnalysisEngine, AnalysisResult, SeriesImages
+from mri_read.engine import AnalysisEngine, AnalysisResult, SeriesImages
+from mri_read.paths import ROOT
 
 DEFAULT_MODEL = "claude-sonnet-5"
 
@@ -49,8 +50,8 @@ Return ONLY valid JSON, no prose outside it, in this exact shape:
 
 def _load_dotenv() -> None:
     """Minimal .env loader so ANTHROPIC_API_KEY can live in a file."""
-    path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
-    if not os.path.exists(path):
+    path = ROOT / ".env"
+    if not path.exists():
         return
     for line in open(path):
         line = line.strip()

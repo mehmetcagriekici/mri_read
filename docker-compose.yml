@@ -6,7 +6,7 @@
 #
 # Usage:
 #   docker compose up --build          # runs manifest + analyze, writes ./output
-#   docker compose run --rm app python src/visualize.py --deep   # ad-hoc commands
+#   docker compose run --rm app python src/cmd/visualize.py --deep   # ad-hoc commands
 #
 # GPU: uncomment the `deploy` block under `ollama` if you have NVIDIA + toolkit.
 

@@ -13,23 +13,16 @@ Checks per series:
 
 Augments output/manifest.json with a "qc" block per series.
 
-Usage:
-  python src/qc.py            # prints QC table, updates manifest.json
+CLI entry point: src/cmd/qc.py
 """
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import numpy as np
 import pydicom
 
-from mri import (DATA_DIR, _slice_position, foreground_fraction, list_series,
-                 load_series, volume_window_bounds)
-
-OUT = Path(__file__).resolve().parent.parent / "output"
-MANIFEST = OUT / "manifest.json"
+from mri_read.mri import (DATA_DIR, _slice_position, foreground_fraction,
+                          load_series, volume_window_bounds)
 
 
 def _positions_and_instances(name: str):
@@ -138,37 +131,3 @@ def run_qc(name: str) -> dict:
 
     status = "pass" if not flags else "warn"
     return {"flags": flags, "metrics": metrics, "status": status}
-
-
-def main() -> None:
-    """Run QC on every series, print a table, and fold results into manifest.json."""
-    OUT.mkdir(exist_ok=True)
-    # If a manifest exists we AUGMENT it in place (adding a "qc" block per row);
-    # if not, we still print the QC table but have nowhere to persist it.
-    manifest = None
-    if MANIFEST.exists():
-        manifest = json.loads(MANIFEST.read_text())
-    # Index series rows by name for quick lookup when attaching qc.
-    by_name = {r["series"]: r for r in (manifest["series"] if manifest else [])}
-
-    print(f"{'series':7} {'status':6} {'slices':>6} {'contr':>6} {'snr':>6} "
-          f"{'empty':>6}  flags")
-    print("-" * 78)
-    for name in list_series():
-        qc = run_qc(name)
-        m = qc["metrics"]
-        if name in by_name:
-            by_name[name]["qc"] = qc
-        print(f"{name:7} {qc['status']:6} {m.get('n_slices',0):>6} "
-              f"{m.get('contrast','-'):>6} {m.get('snr','-'):>6} "
-              f"{m.get('empty_slices','-'):>6}  {', '.join(qc['flags']) or 'ok'}")
-
-    if manifest is not None:
-        MANIFEST.write_text(json.dumps(manifest, indent=2))
-        print(f"\nManifest updated with qc: {MANIFEST}")
-    else:
-        print("\n(no manifest.json yet — run src/manifest.py to persist qc)")
-
-
-if __name__ == "__main__":
-    main()

@@ -11,10 +11,7 @@ Two outputs, written to output/:
      sequence at a glance.
   2. Deep-dive: every slice of a series exported as individual PNGs.
 
-Usage:
-  python src/visualize.py                 # overview montage of every series
-  python src/visualize.py --deep          # + full slice export for ALL series
-  python src/visualize.py --deep Seri7    # + full slice export for one series
+CLI entry point: src/cmd/visualize.py
 
 Note: this uses PER-SLICE windowing (window_to_uint8) — fine for eyeballing, but
 the analysis path uses volume-level windowing instead (see analyze.py).
@@ -22,15 +19,11 @@ the analysis path uses volume-level windowing instead (see analyze.py).
 
 from __future__ import annotations
 
-import argparse
-from pathlib import Path
-
 import numpy as np
 from PIL import Image
 
-from mri import list_series, load_series, window_to_uint8
-
-OUT = Path(__file__).resolve().parent.parent / "output"
+from mri_read.mri import list_series, load_series, window_to_uint8
+from mri_read.paths import OUT
 
 
 def montage(volume: np.ndarray, cols: int = 6, max_tiles: int = 24) -> Image.Image:
@@ -97,24 +90,3 @@ def deep_dive_all() -> None:
             deep_dive(name)
         except Exception as e:                       # noqa: BLE001
             print(f"  {name}: skipped ({e})")
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    # nargs='?' with const: bare "--deep" -> sentinel "__all__" (all series);
-    # "--deep Seri7" -> that one series; flag absent -> args.deep is None.
-    ap.add_argument("--deep", nargs="?", const="__all__", metavar="SERIES",
-                    help="export every slice; no value = ALL series, "
-                         "or name one (e.g. Seri7)")
-    args = ap.parse_args()
-
-    overview()                                       # always produce montages
-    if args.deep == "__all__":
-        deep_dive_all()
-    elif args.deep:
-        # Accept both "--deep all" and "--deep Seri7".
-        deep_dive_all() if args.deep.lower() == "all" else deep_dive(args.deep)
-
-
-if __name__ == "__main__":
-    main()

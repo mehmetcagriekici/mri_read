@@ -7,9 +7,10 @@ image size, slice counts, and whether anything looks broken. It reads HEADERS
 ONLY (no pixels), so it's fast and safe to run repeatedly.
 
 This is intentionally standalone — it predates mri.py and does its own light
-reading — so you can run it on a fresh copy of the data with nothing else set up.
+reading (no dependency on mri.load_series) — so you can run it on a fresh copy
+of the data with nothing else set up.
 
-Run:  python src/explore.py
+CLI entry point: src/cmd/explore.py
 
 Output is a printed report; nothing is written to disk.
 """
@@ -22,8 +23,7 @@ from pathlib import Path
 import pydicom
 from pydicom.errors import InvalidDicomError
 
-# mri_test_data lives next to this repo's root (../mri_test_data from src/)
-DATA_DIR = Path(__file__).resolve().parent.parent / "mri_test_data"
+from mri_read.paths import DATA_DIR
 
 
 def read_header(path: Path):
@@ -99,61 +99,18 @@ def summarize_series(name: str, files: list[Path]) -> dict:
     }
 
 
-def main() -> None:
-    if not DATA_DIR.exists():
-        raise SystemExit(f"Data folder not found: {DATA_DIR}")
+def find_series(data_dir: Path = DATA_DIR) -> dict[str, list[Path]]:
+    """Walk the data folder and bucket every .dcm by the folder it lives in.
 
-    # Walk the whole tree and bucket every .dcm by the folder it lives in — that
-    # folder name IS the series (Seri1, Seri2, ...).
+    That folder name IS the series (Seri1, Seri2, ...).
+    """
     series: dict[str, list[Path]] = defaultdict(list)
-    for f in DATA_DIR.rglob("*.dcm"):
+    for f in data_dir.rglob("*.dcm"):
         series[f.parent.name].append(f)
-
-    print(f"Data root: {DATA_DIR}")
-    print(f"Series found: {len(series)} | Total slices: "
-          f"{sum(len(v) for v in series.values())}\n")
-
-    # Print study/patient/scanner info once, from the first file that parses.
-    # (These tags are study-wide, so any slice will do.) The for/else/break
-    # dance stops as soon as we've printed one — outer `break` on success,
-    # `else: continue` to try the next series only if none parsed.
-    for files in series.values():
-        for f in files:
-            ds = read_header(f)
-            if ds is not None:
-                print(f"Study    : {tag(ds, 'StudyDescription')}")
-                print(f"Patient  : sex={tag(ds, 'PatientSex')} "
-                      f"age={tag(ds, 'PatientAge')}")
-                print(f"Scanner  : {tag(ds, 'Manufacturer')} "
-                      f"{tag(ds, 'ManufacturerModelName')}\n")
-                break
-        else:
-            continue
-        break
-
-    # Numeric sort so Seri2 comes before Seri10 (string sort would not).
-    def series_key(n: str):
-        digits = "".join(c for c in n if c.isdigit())
-        return int(digits) if digits else 10**9
-
-    for name in sorted(series, key=series_key):
-        s = summarize_series(name, series[name])
-        print(f"── {s['series']} " + "─" * (40 - len(s['series'])))
-        if s["slices"] == 0:
-            print(f"   No readable slices ({s['unreadable']} unreadable)\n")
-            continue
-        print(f"   description : {s.get('desc')}")
-        print(f"   modality    : {s.get('modality')}")
-        print(f"   image size  : {s.get('size')}  ({s['slices']} slices)")
-        print(f"   thickness   : {s.get('thickness_mm')} mm   "
-              f"spacing: {s.get('pixel_spacing')}")
-        print(f"   field / mfr : {s.get('field_T')} T   {s.get('manufacturer')}")
-        if s["missing_instances"]:
-            print(f"   ⚠ missing instance numbers: {s['missing_instances']}")
-        if s["unreadable"]:
-            print(f"   ⚠ unreadable files: {s['unreadable']}")
-        print()
+    return series
 
 
-if __name__ == "__main__":
-    main()
+def series_sort_key(n: str) -> int:
+    """Numeric sort so Seri2 comes before Seri10 (string sort would not)."""
+    digits = "".join(c for c in n if c.isdigit())
+    return int(digits) if digits else 10**9
