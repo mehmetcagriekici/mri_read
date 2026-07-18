@@ -1,17 +1,30 @@
 """
-Step 5 — the agent loop.
+Step 5 — the local pipeline: deterministic analyze, then an LLM synthesis pass.
 
-Instead of the fixed manifest -> qc -> analyze pipeline (src/cmd/manifest.py,
-src/cmd/qc.py, src/cmd/analyze.py), an orchestrator LLM decides which series
-are worth inspecting, QC'ing, and analyzing by calling tools, then writes the
-report itself. Everything still runs against a local Ollama server — the
-orchestrator model just needs tool-calling support (e.g. qwen2.5, llama3.1),
-which is a different (smaller, text-only) model than the vision model used for
-the actual slice analysis.
+Previously an orchestrator LLM decided (via tool calls) which series to
+inspect, QC, and analyze — a small tool-calling model turned out to be
+unreliable about that, silently skipping whole sequence types some runs.
+Coverage now comes entirely from deterministic code, same as analyze.py; the
+two LLM calls are narrowed to what LLMs are actually needed for here: reading
+images, and turning structured findings into a concise write-up. Neither
+model decides what data exists to look at.
 
-Flow the orchestrator is nudged toward: get_manifest -> optionally run_qc on
-series it's unsure about -> analyze_series on the ones worth a detailed read
--> write_report.
+Flow, every step always runs (no model can skip one):
+  1. build_manifest()               -- classify every series (rule-based).
+  2. run_qc() on every use_for_analysis series -- deterministic quality flags,
+                                        folded into the manifest (mirrors qc.py).
+     Reformats/localizers are skipped since they're never analyzed anyway.
+  3. select_series() + one vision-engine .analyze() call over every primary
+     series (one per sequence type, picking the BEST candidate per type via
+     analyze._rank_key -- e.g. the DWI folder with more b-values, the
+     thinnest 3D T1, the cleanest QC/SNR for everything else) -- the same
+     building blocks analyze.py uses, so slice selection/windowing isn't
+     duplicated. The vision model (OLLAMA_MODEL, default llava:13b) reads the
+     images and returns structured per-sequence observations.
+  4. A separate TEXT-reasoning model (OLLAMA_AGENT_MODEL, default a local
+     medical-domain fine-tune) reads the manifest + QC + step-3 findings —
+     never the images themselves — and writes the final concise impression.
+     This is one-shot: no tool-calling support is required for this model.
 
 CLI entry point: src/cmd/agent.py
 """
@@ -19,250 +32,167 @@ CLI entry point: src/cmd/agent.py
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 
-from mri_read.analyze import select_named_series, write_report
-from mri_read.engine import get_engine
+from mri_read.analyze import select_series, write_report
+from mri_read.config import DEFAULT as CFG
+from mri_read.engine import AnalysisResult, get_engine
 from mri_read.manifest import build_manifest
-from mri_read.mri import list_series
-from mri_read.ollama_client import ensure_model, post
-from mri_read.paths import OUT
+from mri_read.ollama_client import ensure_model, parse_json_reply, post
 from mri_read.qc import run_qc
 
-DEFAULT_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-# A small text/tool-calling model — deliberately NOT the vision model used for
-# analyze_series, which is chosen separately (see get_engine).
-DEFAULT_MODEL = os.environ.get("OLLAMA_AGENT_MODEL", "qwen2.5")
+DEFAULT_HOST = CFG.ollama_host
+# Text-reasoning model that synthesizes the final report from the deterministic
+# manifest/QC data + the vision engine's findings. Deliberately a different
+# model from OLLAMA_MODEL (the vision engine) — a medical-domain fine-tune
+# rather than a vision model, and no tool-calling support is required since
+# this is a single one-shot completion over data that's already assembled.
+DEFAULT_MODEL = CFG.agent_model
 
-SYSTEM_PROMPT = """You are orchestrating a local, research-prototype MRI-reading \
-pipeline for a brain MRI study. You do not see the images yourself — you decide \
-which series are worth a detailed read and drive the pipeline via tools.
+SYNTH_SYSTEM = """You are a medical-domain assistant writing the FINAL summary of a \
+local, research-prototype brain MRI read. You do not see images yourself. You are \
+given:
+- the study manifest: every series, its inferred sequence type, and deterministic \
+QC flags (missing slices, uneven spacing, low contrast, low SNR, mostly-empty).
+- structured findings a vision model already reported after reading the images per \
+sequence (observations, a draft impression, flags/caveats).
 
-The study manifest (every series, its sequence type — T1, T2, FLAIR, DWI, 3D T1, \
-reformats, localizers... — and its use_for_analysis flag) is already given to you \
-in the first message below. You do not need to call get_manifest yourself.
+Synthesize these into ONE concise, coherent impression: reconcile findings across \
+sequences, lower your confidence in (or explicitly caveat) any finding whose series \
+has a QC flag, and note any primary sequence type that has QC issues.
 
-From there:
-1. Optionally run_qc on any series you want more confidence in before including it.
-2. analyze_series with the series names worth a detailed read — usually one per \
-   sequence type, skipping reformats/localizers/unknowns.
-3. write_report to persist the result.
+This is a research/engineering prototype, NOT clinical care — never give patient \
+instructions or a diagnosis.
 
-You MUST call analyze_series and then write_report before giving your final answer \
-— do not reply with a text-only answer until write_report has been called.
-
-This is a research/engineering prototype, NOT clinical care. When you are done, \
-reply with a short plain-text summary of what you found (no further tool calls)."""
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "list_series",
-            "description": "List all series folder names found in the MRI study.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_manifest",
-            "description": ("Classify every series (sequence type, plane, confidence, "
-                            "use_for_analysis) and return the study manifest. "
-                            "Call this first to see what's in the study."),
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "run_qc",
-            "description": ("Run deterministic quality-control checks on one series "
-                            "(missing slices, uneven spacing, contrast, SNR, empty slices)."),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "series": {"type": "string",
-                              "description": "Series folder name, e.g. 'Seri6'"},
-                },
-                "required": ["series"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "analyze_series",
-            "description": ("Send the named series' slices to the local vision engine "
-                            "for a structured radiology-style read. Call once you've "
-                            "picked which series are worth analyzing."),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "series": {"type": "array", "items": {"type": "string"},
-                              "description": "Series folder names, e.g. ['Seri6', 'Seri1']"},
-                    "slices_per_series": {"type": "integer",
-                                         "description": "Representative slices per series (default 4)"},
-                },
-                "required": ["series"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_report",
-            "description": ("Persist the most recent analyze_series result to "
-                            "output/report.json and output/report.md. Call this last."),
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-]
+Return ONLY valid JSON in this exact shape:
+{
+  "impression": "2-4 sentence concise overall summary",
+  "flags": ["short phrases for anything notable, low-confidence, or QC-limited"]
+}"""
 
 
 @dataclass
 class AgentContext:
-    """State the tool calls read/write across one agent run."""
-    engine_name: str = "ollama"
-    engine_kwargs: dict | None = None
-    host: str = DEFAULT_HOST     # --host, threaded into the vision engine too
+    """State returned to the CLI after one pipeline run."""
     manifest: dict | None = None
-    last_result: object = None   # AnalysisResult, once analyze_series has run
-    engine: object = None        # AnalysisEngine, built lazily and reused
+    last_result: AnalysisResult | None = None
 
 
-def _tool_list_series(_args: dict, _ctx: AgentContext) -> dict:
-    return {"series": list_series()}
+class PipelineError(RuntimeError):
+    """The vision engine or text-synthesis call failed.
 
-
-def _tool_get_manifest(_args: dict, ctx: AgentContext) -> dict:
-    ctx.manifest = build_manifest()
-    return ctx.manifest
-
-
-def _tool_run_qc(args: dict, _ctx: AgentContext) -> dict:
-    name = args["series"]
-    return run_qc(name)
-
-
-def _engine_kwargs(ctx: AgentContext) -> dict:
-    """CLI-provided engine kwargs, plus --host for engines that take one.
-
-    The Ollama engines are the ones that talk to a host; the Claude engine
-    doesn't accept a host kwarg, so we only inject it for ollama/local.
+    Carries the AgentContext built so far (manifest + QC already ran) so the
+    caller can still persist output/manifest.json for debugging instead of
+    losing that work to an uncaught traceback.
     """
-    kwargs = dict(ctx.engine_kwargs or {})
-    if ctx.engine_name in ("ollama", "local") and "host" not in kwargs:
-        kwargs["host"] = ctx.host
-    return kwargs
+    def __init__(self, message: str, ctx: AgentContext):
+        super().__init__(message)
+        self.ctx = ctx
 
 
-def _get_engine(ctx: AgentContext):
-    """Build the vision engine once per agent run and reuse it.
+def _synthesize(model: str, host: str, study_meta: dict, manifest: dict,
+                vision_result: AnalysisResult, timeout: int) -> dict:
+    """One-shot text-reasoning pass over the deterministic data + vision findings.
 
-    Avoids re-running ensure_model()'s connectivity/pull check on every
-    analyze_series call when the orchestrator invokes it more than once.
+    No images, no tool calls, no decisions about what to look at — just the
+    manifest/QC/vision-observations JSON in, a concise {"impression", "flags"}
+    JSON out.
     """
-    if ctx.engine is None:
-        ctx.engine = get_engine(ctx.engine_name, **_engine_kwargs(ctx))
-    return ctx.engine
-
-
-def _tool_analyze_series(args: dict, ctx: AgentContext) -> dict:
-    if ctx.manifest is None:
-        ctx.manifest = build_manifest()
-    names = args.get("series") or []
-    k = int(args.get("slices_per_series", 4))
-    series_images = select_named_series(ctx.manifest, names, k)
-    if not series_images:
-        return {"error": f"none of {names} matched a series in the manifest"}
-
-    engine = _get_engine(ctx)
-    result = engine.analyze(ctx.manifest.get("study", {}), series_images)
-    ctx.last_result = result
-    return {
-        "engine": result.engine,
-        "sequences_reviewed": result.sequences_reviewed,
-        "observations": result.observations,
-        "impression": result.impression,
-        "flags": result.flags,
+    payload = {
+        "study": study_meta,
+        "series": [
+            {"series": r["series"], "label": r["label"],
+             "use_for_analysis": r["use_for_analysis"], "qc": r.get("qc")}
+            for r in manifest["series"]
+        ],
+        "vision_findings": {
+            "engine": vision_result.engine,
+            "sequences_reviewed": vision_result.sequences_reviewed,
+            "observations": vision_result.observations,
+            "draft_impression": vision_result.impression,
+            "flags": vision_result.flags,
+        },
     }
-
-
-def _tool_write_report(_args: dict, ctx: AgentContext) -> dict:
-    if ctx.last_result is None:
-        return {"error": "no analysis result yet; call analyze_series first"}
-    write_report(ctx.last_result, ctx.manifest.get("study", {}))
-    return {"report_md": str(OUT / "report.md"), "report_json": str(OUT / "report.json")}
-
-
-_TOOL_IMPLS = {
-    "list_series": _tool_list_series,
-    "get_manifest": _tool_get_manifest,
-    "run_qc": _tool_run_qc,
-    "analyze_series": _tool_analyze_series,
-    "write_report": _tool_write_report,
-}
-
-
-def _dispatch(name: str, args: dict, ctx: AgentContext) -> dict:
-    impl = _TOOL_IMPLS.get(name)
-    if impl is None:
-        return {"error": f"unknown tool {name!r}"}
+    messages = [
+        {"role": "system", "content": SYNTH_SYSTEM},
+        {"role": "user", "content": json.dumps(payload, default=str)},
+    ]
+    resp = post(host, "/api/chat", {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "options": {"temperature": 0.2},
+    }, timeout)
+    text = resp.get("message", {}).get("content", "")
     try:
-        return impl(args, ctx)
-    except Exception as e:                           # noqa: BLE001 - report, don't crash the loop
-        return {"error": str(e)}
+        synth = parse_json_reply(text)
+    except (ValueError, IndexError):                    # malformed/non-JSON model reply
+        return {"impression": text, "flags": ["unparsed"]}
+    synth["flags"] = synth.get("flags") or []           # tolerate an explicit null
+    return synth
 
 
 def run_agent(model: str = DEFAULT_MODEL, host: str = DEFAULT_HOST,
              engine_name: str = "ollama", engine_kwargs: dict | None = None,
-             max_steps: int = 12, timeout: int = 900) -> tuple[str, AgentContext]:
-    """Run the tool-calling agent loop to completion (or until max_steps).
+             vision_slices: int = 4, skip_qc_warn: bool = False,
+             timeout: int = 900) -> tuple[str, AgentContext]:
+    """Run the full local pipeline: deterministic analyze, then LLM synthesis.
 
-    Standalone: the manifest is always built up front, in code, rather than
-    left as a tool call the orchestrator model has to remember to make first
-    — small tool-calling models are unreliable about that. This guarantees
-    running `python src/cmd/agent.py` alone covers Step 3 (manifest) without
-    the user separately running manifest.py, no matter how the model behaves.
-    QC / analysis / report are still the model's calls to make via tools.
-
-    Returns (final_text_summary, context) — context.last_result holds the
-    AnalysisResult if analyze_series was called.
+    Coverage is guaranteed — manifest, QC, and vision analysis all run over
+    the whole study, the same way analyze.py does it, regardless of what
+    either model says. Returns (final_impression_text, context); context.manifest
+    carries the qc-augmented manifest, context.last_result the final
+    AnalysisResult (already written to output/report.md + report.json).
     """
-    model = ensure_model(host, model)                 # resolve to exact pulled tag
-    ctx = AgentContext(engine_name=engine_name, engine_kwargs=engine_kwargs, host=host)
-    ctx.manifest = build_manifest()                    # guaranteed, not left to a tool call
+    ctx = AgentContext()
+    ctx.manifest = build_manifest()
+    for row in ctx.manifest["series"]:
+        if row.get("use_for_analysis"):               # skip reformats/localizers — never analyzed
+            row["qc"] = run_qc(row["series"])
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": (
-            "Read this MRI study and produce a report. Here is the manifest "
-            "(already computed for you — no need to call get_manifest):\n"
-            f"{json.dumps(ctx.manifest, default=str)}"
-        )},
-    ]
+    study_meta = ctx.manifest.get("study", {})
+    series_images = select_series(ctx.manifest, vision_slices,
+                                  one_per_label=True, skip_qc_warn=skip_qc_warn)
 
-    for _ in range(max_steps):
-        resp = post(host, "/api/chat", {
-            "model": model,
-            "messages": messages,
-            "tools": TOOLS,
-            "stream": False,
-            "options": {"temperature": 0.2},
-        }, timeout)
-        msg = resp.get("message", {})
-        tool_calls = msg.get("tool_calls") or []
-        if not tool_calls:
-            return msg.get("content", ""), ctx
+    # engine_kwargs only ever carries CLI overrides (model/timeout); inject
+    # `host` here too so --host reaches the vision engine, not just the text
+    # model below. The Claude engine doesn't accept a host kwarg, so this is
+    # ollama/local-only, same as the tool-calling agent this replaced did.
+    vision_kwargs = dict(engine_kwargs or {})
+    if engine_name in ("ollama", "local") and "host" not in vision_kwargs:
+        vision_kwargs["host"] = host
+    try:
+        vision_engine = get_engine(engine_name, **vision_kwargs)
+        vision_result = vision_engine.analyze(study_meta, series_images)
+    except Exception as e:
+        # Intentionally broad: this boundary sits behind the pluggable engine
+        # abstraction (get_engine), so the failure could be a network error
+        # from the ollama engine, an anthropic SDK error from the claude
+        # engine, or something else from a future engine — the point of the
+        # abstraction is that this call site doesn't know which. Nothing is
+        # swallowed: it's converted to a PipelineError carrying the already-
+        # built manifest/QC and re-raised (`from e` keeps the original
+        # traceback) so the caller can still persist that partial work.
+        raise PipelineError(f"vision engine failed: {e}", ctx) from e
 
-        messages.append(msg)
-        for call in tool_calls:
-            fn = call["function"]["name"]
-            args = call["function"].get("arguments") or {}
-            print(f"  -> {fn}({args})")
-            result = _dispatch(fn, args, ctx)
-            messages.append({"role": "tool", "content": json.dumps(result, default=str)})
+    try:
+        text_model = ensure_model(host, model)          # resolve to exact pulled tag
+        synth = _synthesize(text_model, host, study_meta, ctx.manifest, vision_result, timeout)
+    except Exception as e:
+        # Same rationale as above: ensure_model/_synthesize talk HTTP to a
+        # local Ollama server, whose failure modes (connection refused, model
+        # not found, bad JSON reply) aren't worth enumerating here — re-raised
+        # as PipelineError, not swallowed.
+        raise PipelineError(f"text-synthesis model failed: {e}", ctx) from e
 
-    return "(stopped after max_steps without a final answer)", ctx
+    ctx.last_result = AnalysisResult(
+        engine=f"{vision_result.engine} + text:{text_model}",
+        sequences_reviewed=vision_result.sequences_reviewed,
+        observations=vision_result.observations,
+        impression=synth.get("impression") or vision_result.impression,
+        flags=list(dict.fromkeys(vision_result.flags + synth.get("flags", []))),
+        disclaimer=vision_result.disclaimer,
+        raw={"vision": vision_result.raw, "synthesis": synth},
+    )
+    write_report(ctx.last_result, study_meta)
+    return ctx.last_result.impression, ctx

@@ -30,6 +30,7 @@ Nothing here talks to a network or a model — it is pure local file reading.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 import numpy as np
 import pydicom
@@ -101,6 +102,7 @@ def plane_from_orientation(ds) -> str:
     return {0: "Sagittal", 1: "Coronal", 2: "Axial"}[axis]
 
 
+@lru_cache(maxsize=None)
 def load_series(name: str) -> Series:
     """Read every slice in a series folder and return a sorted 3D Series.
 
@@ -111,6 +113,12 @@ def load_series(name: str) -> Series:
       4. Stack into a single (slices, rows, cols) array, keeping only slices
          that share the most common shape (a stray odd-sized frame — e.g. a
          localizer mixed in — would otherwise break np.stack).
+
+    Cached per process: agent.py's run_qc() and select_series() both load the
+    same series in a single run (QC needs pixels for contrast/SNR, analysis
+    needs them for slice selection) — without this, a 150+-slice series like
+    3D T1 gets decoded from disk twice back to back. Callers must treat the
+    returned Series as read-only; the array is shared across callers.
     """
     folder = DATA_DIR / name
     files = sorted(folder.glob("*.dcm"))

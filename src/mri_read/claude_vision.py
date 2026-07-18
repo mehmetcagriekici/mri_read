@@ -15,10 +15,10 @@ research purposes only.
 from __future__ import annotations
 
 import base64
-import json
 import os
 
 from mri_read.engine import AnalysisEngine, AnalysisResult, SeriesImages
+from mri_read.ollama_client import parse_json_reply
 from mri_read.paths import ROOT
 
 DEFAULT_MODEL = "claude-sonnet-5"
@@ -60,22 +60,14 @@ def _load_dotenv() -> None:
             os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
-def _extract_json(text: str) -> dict:
-    """Tolerate ```json fences / stray prose around the JSON object."""
-    t = text.strip()
-    if t.startswith("```"):
-        t = t.split("```", 2)[1]
-        if t.startswith("json"):
-            t = t[4:]
-    start, end = t.find("{"), t.rfind("}")
-    return json.loads(t[start:end + 1])
-
-
 class ClaudeVisionEngine(AnalysisEngine):
     name = "claude-vision"
 
     def __init__(self, model: str = DEFAULT_MODEL):
         # Fail fast with a clear message if the key is missing, before any call.
+        # Reads os.environ live (not via mri_read.config) because _load_dotenv()
+        # is a runtime side effect that must run first -- a module-level Config
+        # snapshot would capture the env before .env ever gets a chance to set it.
         _load_dotenv()
         if not os.environ.get("ANTHROPIC_API_KEY"):
             raise RuntimeError(
@@ -121,8 +113,8 @@ class ClaudeVisionEngine(AnalysisEngine):
         text = "".join(b.text for b in msg.content if b.type == "text")
 
         try:
-            data = _extract_json(text)
-        except Exception:                            # noqa: BLE001
+            data = parse_json_reply(text)
+        except (ValueError, IndexError):             # malformed/non-JSON model reply
             data = {"impression": text, "observations": [], "flags": ["unparsed"]}
 
         return AnalysisResult(
@@ -131,7 +123,7 @@ class ClaudeVisionEngine(AnalysisEngine):
                                         [s.label for s in series]),
             observations=data.get("observations", []),
             impression=data.get("impression", ""),
-            flags=data.get("flags", []),
+            flags=data.get("flags") or [],
             disclaimer=("Research/engineering prototype. NOT a medical diagnosis. "
                         "Not validated for clinical use."),
             raw=data,

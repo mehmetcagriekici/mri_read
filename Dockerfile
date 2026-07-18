@@ -19,7 +19,11 @@ RUN pip install --no-cache-dir -e . --no-deps
 
 # Talk to the Ollama service by its compose hostname; override if needed.
 ENV OLLAMA_HOST=http://ollama:11434
-ENV OLLAMA_MODEL=llama3.2-vision
+ENV OLLAMA_MODEL=llava:13b
 
-# Default run: manifest -> QC -> local analysis.
-CMD ["sh", "-c", "python src/cmd/manifest.py && python src/cmd/qc.py && python src/cmd/analyze.py"]
+# Default run: the agent loop (see src/cmd/agent.py). It builds the manifest
+# itself and drives QC/analysis/report via tool calls — manifest.py, qc.py,
+# and analyze.py are still available individually for development/debugging
+# (`docker compose run --rm app python src/cmd/analyze.py`), but are no
+# longer the primary entry point.
+CMD ["python", "src/cmd/agent.py"]

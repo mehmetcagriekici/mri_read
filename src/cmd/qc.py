@@ -1,8 +1,10 @@
 """
 CLI entry point for Step 3b — deterministic quality control.
 
-All the real logic lives in mri_read.qc; this just prints the table and
-augments output/manifest.json with a "qc" block per series.
+Development/debugging tool: prints the QC table and augments
+output/manifest.json standalone, for inspecting QC in isolation. The primary
+entry point for running the project is `src/cmd/agent.py`, whose run_qc tool
+calls the same mri_read.qc.run_qc() but doesn't persist to manifest.json.
 
 Usage:
   python src/cmd/qc.py            # prints QC table, updates manifest.json
@@ -41,8 +43,9 @@ def main() -> None:
         m = qc["metrics"]
         if name in by_name:
             by_name[name]["qc"] = qc
+        snr = m.get("snr")                            # None -- e.g. flat/masked corners
         print(f"{name:7} {qc['status']:6} {m.get('n_slices',0):>6} "
-              f"{m.get('contrast','-'):>6} {m.get('snr','-'):>6} "
+              f"{m.get('contrast','-'):>6} {snr if snr is not None else '-':>6} "
               f"{m.get('empty_slices','-'):>6}  {', '.join(qc['flags']) or 'ok'}")
 
     if manifest is not None:

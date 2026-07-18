@@ -9,8 +9,11 @@ plumbing lives here once instead of being copied into each.
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.request
+
+logger = logging.getLogger(__name__)
 
 
 def post(host: str, path: str, payload: dict, timeout: int) -> dict:
@@ -22,6 +25,25 @@ def post(host: str, path: str, payload: dict, timeout: int) -> dict:
     )
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
+
+
+def parse_json_reply(text: str) -> dict:
+    """Pull a JSON object out of a chat model's reply, tolerating extra text.
+
+    Local models don't reliably return pure JSON — they add prose or wrap it in
+    ```json fences. Strip a leading fence, then slice from the first "{" to the
+    last "}" and parse that. Shared by every step that asks an LLM for
+    structured JSON: the Ollama vision engine, the agent's synthesis pass, and
+    (despite the module name) the non-local Claude engine too — the parsing
+    problem isn't Ollama-specific, only the HTTP transport below is.
+    """
+    t = text.strip()
+    if t.startswith("```"):                          # drop a ```json ... ``` fence
+        t = t.split("```", 2)[1]
+        if t.startswith("json"):
+            t = t[4:]
+    start, end = t.find("{"), t.rfind("}")            # outermost braces
+    return json.loads(t[start:end + 1])
 
 
 def _resolve_model(host: str, model: str) -> str | None:
@@ -74,7 +96,7 @@ def ensure_model(host: str, model: str) -> str:
     resolved = _resolve_model(host, model)
     if resolved is not None:
         return resolved
-    print(f"Pulling local model '{model}' (one-time)...")
+    logger.info("Pulling local model '%s' (one-time)...", model)
     # /api/pull streams progress lines; read to completion.
     req = urllib.request.Request(
         f"{host.rstrip('/')}/api/pull",
@@ -88,6 +110,11 @@ def ensure_model(host: str, model: str) -> str:
             except json.JSONDecodeError:
                 continue
             if status:
+                # A live-updating single-line progress meter, not a discrete
+                # log event — print() (with \r) is the right tool here, not
+                # logging, which would emit one line per update instead of
+                # overwriting in place.
                 print(f"  {status}", end="\r")
-    print("\n  done.")
+    print()
+    logger.info("done.")
     return model

@@ -1,8 +1,10 @@
 """
 CLI entry point for Step 3 — sequence classifier + study manifest.
 
-All the real logic lives in mri_read.manifest; this just prints the table and
-persists output/manifest.json.
+Development/debugging tool: prints the manifest table and persists
+output/manifest.json standalone, for inspecting classification in isolation.
+The primary entry point for running the project is `src/cmd/agent.py`, which
+builds the manifest itself.
 
 Usage:
   python src/cmd/manifest.py            # print manifest + write output/manifest.json

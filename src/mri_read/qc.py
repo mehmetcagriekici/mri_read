@@ -21,16 +21,19 @@ from __future__ import annotations
 import numpy as np
 import pydicom
 
+from mri_read.dwi import count_bvalue_buckets_from_values
 from mri_read.mri import (DATA_DIR, _slice_position, foreground_fraction,
-                          load_series, volume_window_bounds)
+                          load_series, read_bvalue, volume_window_bounds)
 
 
 def _positions_and_instances(name: str):
-    """Return (positions, instance_numbers) for a series, geometrically sorted.
+    """Return (positions, instance_numbers, bvalues) for a series, sorted.
 
     Header-only read. `positions` are mm along the slice normal (for the
     spacing check); `instances` are the scanner slice indices (for the
-    missing-slice check).
+    missing-slice check); `bvalues` are each slice's diffusion b-value (or
+    None), read from the same headers so a DWI-candidate ranking check later
+    (analyze.py's _rank_key) doesn't have to re-open every file on disk.
     """
     files = sorted((DATA_DIR / name).glob("*.dcm"))
     heads = []
@@ -43,15 +46,22 @@ def _positions_and_instances(name: str):
     heads.sort(key=_slice_position)                  # anatomical order
     positions = [_slice_position(h) for h in heads]
     instances = [int(getattr(h, "InstanceNumber", 0)) for h in heads]
-    return positions, instances
+    bvalues = [read_bvalue(h) for h in heads]
+    return positions, instances, bvalues
 
 
-def _background_snr(volume: np.ndarray) -> float:
-    """Rough signal-to-noise ratio of the middle slice.
+def _background_snr(volume: np.ndarray) -> float | None:
+    """Rough signal-to-noise ratio of the middle slice, or None if unmeasurable.
 
     Trick: the four image CORNERS are (almost) always empty background, so their
     standard deviation estimates the noise floor. Signal = mean intensity of the
     foreground (tissue). SNR = signal / noise. A low value means a grainy scan.
+
+    Returns None when the corners are perfectly flat (std == 0) — common with a
+    hard-masked circular FOV reconstruction where the true corners are exact
+    zero. There's no noise information in a flat patch, so a signal/~0 ratio
+    would be a meaningless, arbitrarily huge number rather than a real
+    measurement — better to say "unknown" than report a false one.
     """
     z = volume.shape[0] // 2                          # middle slice = most tissue
     img = volume[z]
@@ -61,7 +71,9 @@ def _background_snr(volume: np.ndarray) -> float:
         img[:c, :c].ravel(), img[:c, -c:].ravel(),
         img[-c:, :c].ravel(), img[-c:, -c:].ravel(),
     ])
-    noise = float(corners.std()) or 1e-6             # avoid divide-by-zero
+    noise = float(corners.std())
+    if noise < 1e-6:                                  # flat corners -- no noise to measure
+        return None
     lo, hi = float(img.min()), float(img.max())
     fg = img[img > lo + 0.10 * (hi - lo)]            # foreground (tissue) pixels
     signal = float(fg.mean()) if fg.size else 0.0
@@ -78,9 +90,10 @@ def run_qc(name: str) -> dict:
     flags: list[str] = []
     metrics: dict = {}
 
-    positions, instances = _positions_and_instances(name)
+    positions, instances, bvalues = _positions_and_instances(name)
     n = len(positions)
     metrics["n_slices"] = n
+    metrics["bvalue_buckets"] = count_bvalue_buckets_from_values(bvalues)
 
     # 1) MISSING SLICES: if InstanceNumbers span more indices than we have files,
     #    the difference is how many slices are absent.
@@ -116,10 +129,11 @@ def run_qc(name: str) -> dict:
     if rng < 0.15:
         flags.append("low-contrast")
 
-    # 4) NOISE: see _background_snr. Below ~8 is a grainy acquisition.
+    # 4) NOISE: see _background_snr. Below ~8 is a grainy acquisition; None means
+    #    it couldn't be measured (flat corners), not that the volume is noisy.
     snr = _background_snr(vol)
-    metrics["snr"] = round(snr, 1)
-    if snr < 8:
+    metrics["snr"] = round(snr, 1) if snr is not None else None
+    if snr is not None and snr < 8:
         flags.append("low-snr")
 
     # 5) EMPTY SLICES: count slices that are essentially background. If more than

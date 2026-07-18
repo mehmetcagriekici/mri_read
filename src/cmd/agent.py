@@ -1,50 +1,88 @@
 """
-CLI entry point for Step 5 — the LLM-orchestrated agent loop.
+CLI entry point for Step 5 — the local pipeline (deterministic analyze + LLM synthesis).
 
-Instead of the fixed manifest -> qc -> analyze pipeline, an orchestrator model
-decides which series to inspect, QC, and analyze via tool calls, then writes
-the report. Everything runs against a local Ollama server.
+This is the primary entry point for the project: run this alone and it builds
+the manifest, QCs and analyzes every primary series, then has a text-reasoning
+model synthesize the final report. Everything runs against a local Ollama
+server. (manifest.py/qc.py/analyze.py still exist individually for
+development/debugging, but this is the one command to run for a report.)
 
 Usage:
   python src/cmd/agent.py
-  python src/cmd/agent.py --model qwen2.5 --engine ollama --vision-model llama3.2-vision
+  python src/cmd/agent.py --model meditron:7b --engine ollama --vision-model llava:13b
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import logging
+import sys
 
-from mri_read.agent import DEFAULT_HOST, DEFAULT_MODEL, run_agent
+from mri_read.agent import DEFAULT_HOST, DEFAULT_MODEL, PipelineError, run_agent
 from mri_read.paths import OUT
 
 
 def main() -> None:
+    # mri_read/ modules log their own progress (model pulls, per-series vision
+    # calls, QC skips) via the stdlib logging module rather than print(); this
+    # is the CLI entry point that turns those into visible output, matching
+    # the plain, unprefixed look print() used to produce.
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=DEFAULT_MODEL,
-                    help="orchestrator model; must support tool calling (default qwen2.5)")
+                    help="text-reasoning model that synthesizes the final report "
+                         "from the manifest/QC/vision findings (default meditron:7b); "
+                         "no tool-calling support needed")
     ap.add_argument("--host", default=DEFAULT_HOST)
     ap.add_argument("--engine", default="ollama",
-                    help="vision engine analyze_series calls: ollama (local, default) | claude (non-local)")
+                    help="vision engine used to read series images: ollama (local, default) | claude (non-local)")
     ap.add_argument("--vision-model", default=None,
                     help="override the vision engine's model")
-    ap.add_argument("--max-steps", type=int, default=12,
-                    help="cap on tool-calling rounds before giving up (default 12)")
+    ap.add_argument("--vision-timeout", type=int, default=None,
+                    help="seconds to wait for EACH per-series vision call (one "
+                         "call per sequence type, default 600; raise this on "
+                         "slow CPU-only setups if you see a socket TimeoutError)")
+    ap.add_argument("--slices", type=int, default=4,
+                    help="slices per series handed to the vision engine (default 4)")
+    ap.add_argument("--skip-qc-warn", action="store_true",
+                    help="skip series QC flagged as warn from the vision analysis")
+    ap.add_argument("--synth-timeout", type=int, default=None,
+                    help="seconds to wait for the text-reasoning synthesis call "
+                         "(default 900; raise this on slow CPU-only setups if you "
+                         "see a socket TimeoutError)")
     args = ap.parse_args()
 
     OUT.mkdir(exist_ok=True)
-    engine_kwargs = {"model": args.vision_model} if args.vision_model else {}
+    engine_kwargs = {}
+    if args.vision_model:
+        engine_kwargs["model"] = args.vision_model
+    if args.vision_timeout:
+        engine_kwargs["timeout"] = args.vision_timeout
+    run_kwargs = {"vision_slices": args.slices, "skip_qc_warn": args.skip_qc_warn}
+    if args.synth_timeout:
+        run_kwargs["timeout"] = args.synth_timeout
 
     try:
         summary, ctx = run_agent(args.model, args.host, args.engine, engine_kwargs,
-                                 max_steps=args.max_steps)
+                                 **run_kwargs)
     except FileNotFoundError as e:
         raise SystemExit(str(e)) from None
+    except PipelineError as e:
+        # manifest + QC already ran even though the vision/text call failed —
+        # persist it so it's still inspectable instead of losing that work.
+        (OUT / "manifest.json").write_text(json.dumps(e.ctx.manifest, indent=2))
+        raise SystemExit(f"{e}\n(partial manifest persisted to {OUT / 'manifest.json'} "
+                         "for debugging)") from None
 
-    print("\n=== Agent summary ===")
+    # Persist the qc-augmented manifest (in-memory only inside run_agent) so
+    # it's inspectable afterward, same as manifest.py/qc.py's standalone output.
+    (OUT / "manifest.json").write_text(json.dumps(ctx.manifest, indent=2))
+
+    print("\n=== Report summary ===")
     print(summary)
-    if ctx.last_result is not None:
-        print(f"\nImpression: {ctx.last_result.impression}")
-    print(f"\n(if write_report was called: {OUT / 'report.md'}, {OUT / 'report.json'})")
+    print(f"\nReport written to {OUT / 'report.md'} and {OUT / 'report.json'}")
 
 
 if __name__ == "__main__":

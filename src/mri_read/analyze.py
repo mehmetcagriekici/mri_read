@@ -12,15 +12,18 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 
 import numpy as np
 from PIL import Image
 
-from mri_read.dwi import diffusion_views
+from mri_read.dwi import count_bvalue_buckets, diffusion_views
 from mri_read.engine import SeriesImages
 from mri_read.mri import (apply_window, foreground_fraction, load_series,
                           volume_window_bounds)
 from mri_read.paths import OUT
+
+logger = logging.getLogger(__name__)
 
 
 def content_indices(volume: np.ndarray, k: int, min_fg: float = 0.05) -> list[int]:
@@ -70,11 +73,7 @@ def _dwi_images(row: dict, slices: int) -> list[SeriesImages]:
 
 
 def build_series_images(row: dict, slices: int) -> list[SeriesImages]:
-    """Build SeriesImages for one manifest row, DWI handled specially.
-
-    Shared by select_series (the fixed pipeline) and select_named_series (an
-    agent picking specific series by name) so both go through one code path.
-    """
+    """Build SeriesImages for one manifest row, DWI handled specially."""
     if row["label"] == "DWI":
         return _dwi_images(row, slices)
     s = load_series(row["series"])
@@ -88,40 +87,73 @@ def build_series_images(row: dict, slices: int) -> list[SeriesImages]:
     )]
 
 
+def _rank_key(row: dict) -> tuple:
+    """Higher is better. QC status always leads, then a label-specific tie-break.
+
+    - status first, always: a series whose pixel load already failed QC
+      ("error") or that's flagged ("warn") never outranks a clean one, no
+      matter how it scores on the label-specific criteria below.
+    - DWI: more distinct b-value buckets (needed for an ADC map — reused from
+      QC's own header pass when available, see count_bvalue_buckets_from_values
+      in dwi.py, falling back to a fresh header scan otherwise), then more slices.
+    - 3D T1: thinner slices (more volumetric detail).
+    - Everything else: higher SNR: an unmeasurable SNR (None — e.g. a flat,
+      hard-masked FOV; see qc.py's _background_snr) is treated as a borderline
+      PASS (the qc.py low-snr threshold) rather than as the worst possible
+      score, since "unmeasured" isn't evidence of a noisy scan.
+    Used to pick the single BEST row per label when several series share one
+    sequence type (e.g. Seri1/Seri8/Seri9 all classified DWI).
+    """
+    qc = row.get("qc") or {}
+    status_rank = {"pass": 2, "warn": 1, "error": 0}.get(qc.get("status"), 0)
+    metrics = qc.get("metrics") or {}
+    snr = metrics.get("snr")
+    if snr is None:
+        snr = 8.0                                      # qc.py's low-snr pass/warn threshold
+
+    if row["label"] == "DWI":
+        buckets = metrics.get("bvalue_buckets")
+        if buckets is None:                            # QC didn't run on this row
+            buckets = count_bvalue_buckets(row["series"])
+        return (status_rank, buckets, row.get("n_slices", 0))
+    if row["label"] == "3D T1":
+        thickness = (row.get("acq") or {}).get("thickness_mm")
+        return (status_rank, -thickness if thickness is not None else float("-inf"))
+    return (status_rank, snr)
+
+
 def select_series(manifest: dict, slices: int, one_per_label: bool,
                   skip_qc_warn: bool):
-    """Build SeriesImages for the primary series in the manifest."""
-    seen = set()
-    out = []
+    """Build SeriesImages for the primary series in the manifest.
+
+    one_per_label picks the single BEST candidate per sequence type via
+    _rank_key (not just the first one encountered in manifest order).
+    """
+    candidates = []
     for row in manifest["series"]:
         if not row.get("use_for_analysis"):
             continue
-        label = row["label"]
-        if one_per_label and label in seen:
-            continue
         qc = row.get("qc", {})
         if skip_qc_warn and qc.get("status") == "warn":
-            print(f"  skipping {row['series']} ({label}) — QC: "
-                  f"{', '.join(qc.get('flags', []))}")
+            logger.info("skipping %s (%s) — QC: %s",
+                       row["series"], row["label"], ", ".join(qc.get("flags", [])))
             continue
-        seen.add(label)
-        out.extend(build_series_images(row, slices))
-    return out
+        candidates.append(row)
 
+    if one_per_label:
+        best: dict[str, dict] = {}
+        best_rank: dict[str, tuple] = {}
+        for row in candidates:
+            label = row["label"]
+            rank = _rank_key(row)                       # computed once per row, not per comparison
+            if label not in best or rank > best_rank[label]:
+                best[label] = row
+                best_rank[label] = rank
+        candidates = list(best.values())
 
-def select_named_series(manifest: dict, names: list[str],
-                        slices: int) -> list[SeriesImages]:
-    """Build SeriesImages for specific series named explicitly (e.g. by an agent).
-
-    Unlike select_series, this doesn't filter by use_for_analysis/QC — the
-    caller already decided which series it wants.
-    """
-    rows = {r["series"]: r for r in manifest["series"]}
     out = []
-    for name in names:
-        row = rows.get(name)
-        if row is not None:
-            out.extend(build_series_images(row, slices))
+    for row in candidates:
+        out.extend(build_series_images(row, slices))
     return out
 
 

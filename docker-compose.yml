@@ -5,8 +5,9 @@
 #   app    : our pipeline. Talks to ollama over the internal network only.
 #
 # Usage:
-#   docker compose up --build          # runs manifest + analyze, writes ./output
+#   docker compose up --build          # runs the agent loop, writes ./output
 #   docker compose run --rm app python src/cmd/visualize.py --deep   # ad-hoc commands
+#   docker compose run --rm app python src/cmd/analyze.py            # fixed pipeline, no agent
 #
 # GPU: uncomment the `deploy` block under `ollama` if you have NVIDIA + toolkit.
 
@@ -16,7 +17,9 @@ services:
     volumes:
       - ollama_models:/root/.ollama       # model weights persist here
     ports:
-      - "11434:11434"                      # optional: reach it from the host too
+      - "11435:11434"                      # optional: reach it from the host too, on
+                                            # 11435 so it doesn't clash with a native
+                                            # `ollama serve` already using 11434
     restart: unless-stopped
     # deploy:
     #   resources:
@@ -32,7 +35,8 @@ services:
       - ollama
     environment:
       OLLAMA_HOST: http://ollama:11434
-      OLLAMA_MODEL: llama3.2-vision
+      OLLAMA_MODEL: llava:13b            # vision engine — reads the images
+      OLLAMA_AGENT_MODEL: meditron:7b    # text-reasoning — synthesizes the final report
     volumes:
       - ./mri_test_data:/app/mri_test_data:ro   # data stays read-only
       - ./output:/app/output                    # reports land here on the host

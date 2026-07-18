@@ -31,16 +31,17 @@ These labels are inferred and get confirmed/encoded as rules in Step 3.
 ## Code layout
 
 `mri_read` is a proper Python package, split into a service layer and thin CLI
-entry points so a future orchestrator (Step 5) can import the service layer
-directly instead of shelling out to scripts:
+entry points so the agent-loop orchestrator (Step 5) can import the service
+layer directly instead of shelling out to scripts:
 
 ```
 src/
   mri_read/    # service logic — importable, no argparse/__main__ here
-    paths.py, mri.py, dwi.py, engine.py, manifest.py, qc.py,
-    analyze.py, ollama_vision.py, claude_vision.py, visualize.py, explore.py
+    paths.py, mri.py, dwi.py, engine.py, manifest.py, qc.py, agent.py,
+    analyze.py, ollama_vision.py, ollama_client.py, claude_vision.py,
+    visualize.py, explore.py
   cmd/         # thin CLI wrappers, one per script, e.g.:
-    explore.py, visualize.py, manifest.py, qc.py, analyze.py, dwi.py
+    explore.py, visualize.py, manifest.py, qc.py, analyze.py, agent.py, dwi.py
 ```
 
 `pyproject.toml` makes `mri_read` pip-installable (`pip install -e .`), so both
@@ -65,57 +66,73 @@ Each step produces something runnable before moving on. Don't skip ahead.
   slices, low contrast, low SNR, empty slices — written into the manifest.
   Deliverable: `src/mri_read/qc.py` (CLI: `src/cmd/qc.py`).
 - [x] **Step 4 — Analysis (local).** Swappable engine interface (`engine.py`);
-  default is a fully local Ollama vision engine (`ollama_vision.py`). Orchestrator
-  (`analyze.py`) reads the manifest, selects slices, writes `output/report.md` +
-  `report.json`. Runs in Docker (`docker-compose.yml`). A specialized model can
-  slot in behind the same interface later. CLI: `src/cmd/analyze.py`.
-- [x] **Step 5 — Agent loop.** A tool-calling orchestrator model decides which
-  series to inspect, QC, and analyze — replacing the fixed manifest -> qc ->
-  analyze sequence with tools it can call in whatever order it judges useful.
+  default is a fully local Ollama vision engine (`ollama_vision.py`). Fixed
+  orchestrator (`analyze.py`) reads the manifest, selects slices, writes
+  `output/report.md` + `report.json` — now a development/debugging tool, see
+  Step 5. A specialized model can slot in behind the same interface later.
+  CLI: `src/cmd/analyze.py`.
+- [x] **Step 5 — Agent: deterministic analyze + LLM synthesis.** The primary
+  way to run the project. No model decides what to look at anymore — the
+  deterministic manifest -> qc -> analyze sequence always runs in full (one
+  series per sequence type, every series QC'd), then a text-reasoning model
+  reads that structured output and writes the final concise report. Builds
+  the manifest itself and runs in Docker (`docker-compose.yml`) by default.
   Deliverable: `src/mri_read/agent.py` (CLI: `src/cmd/agent.py`).
 
-## Analysis engine (Step 4)
+## Running it (Step 5 — the agent)
 
-The orchestrator is engine-agnostic. Default engine is **local Ollama**.
+`src/cmd/agent.py` is the one command to run for a report. It always: builds
+the manifest, runs QC on every series, sends every primary series (one per
+sequence type) to the vision engine in a single call, then hands the
+resulting manifest + QC + vision findings — never the images — to a
+text-reasoning model that synthesizes the final concise impression.
 
-Without Docker (needs Ollama installed and running locally):
+```bash
+ollama serve
+python src/cmd/agent.py
+python src/cmd/agent.py --model meditron:7b --engine ollama --vision-model llava:13b
+```
+
+Two different local models are involved, each doing only what it's suited
+for: a **vision** model (`OLLAMA_MODEL`, default `llava:13b`) reads the
+images and reports structured per-sequence findings; a separate **text**
+model (`OLLAMA_AGENT_MODEL`, default `meditron:7b` — a local medical-domain
+fine-tune) reads the deterministic manifest/QC data plus those findings and
+writes the final report. Neither model needs tool-calling support — the text
+model's job is a single one-shot completion over data that's already fully
+assembled, not deciding which series exist or what to inspect. `OLLAMA_HOST`
+(default `http://localhost:11434`) is shared by both. All models auto-pull on
+first use. Swap `OLLAMA_AGENT_MODEL` for another local medical fine-tune
+(`medllama2`) or a stronger general model (`llama3.1:8b`, `qwen2.5:7b`) if
+you have the RAM/GPU for it — this machine is CPU-only, which is why the
+defaults here are 7-8B-class rather than 70B.
+
+Hardening in the analysis path: volume-level windowing (comparable slices),
+content-aware slice selection (skips near-empty slices), and DWI handling
+(high-b stack + computed ADC map).
+
+To add a specialized brain-MRI model later, implement `AnalysisEngine.analyze()`
+in a new file and register it in `get_engine()` — nothing else changes.
+
+## Running pipeline stages individually (development / debugging)
+
+`manifest.py`, `qc.py`, and `analyze.py` (Steps 3, 3b, 4) are the deterministic
+building blocks the agent loop calls into. They're no longer the primary way
+to run the project, but each is still runnable standalone for testing a stage
+in isolation — e.g. checking classification or QC output without spending time
+on a full agent run:
 
 ```bash
 ollama serve                          # local model server
 python src/cmd/manifest.py            # classify series -> manifest.json
 python src/cmd/qc.py                  # add quality flags to the manifest
-python src/cmd/analyze.py             # local ollama, one series per sequence type
+python src/cmd/analyze.py             # fixed pipeline, no LLM orchestrator, one series per sequence type
 python src/cmd/analyze.py --slices 5 --skip-qc-warn --model qwen2.5vl
 ```
 
-Pipeline order is manifest -> qc -> analyze. Hardening in the analysis path:
-volume-level windowing (comparable slices), content-aware slice selection
-(skips near-empty slices), and DWI handling (high-b stack + computed ADC map).
-
-Config via env: `OLLAMA_HOST` (default `http://localhost:11434`),
-`OLLAMA_MODEL` (default `llama3.2-vision`). The model auto-pulls on first use.
-
-To add a specialized brain-MRI model later, implement `AnalysisEngine.analyze()`
-in a new file and register it in `get_engine()` — nothing else changes.
-
-## Agent loop (Step 5)
-
-An alternative to the fixed manifest -> qc -> analyze pipeline: a tool-calling
-orchestrator model decides what to do. It never sees the images itself — it
-calls `list_series`, `get_manifest`, `run_qc`, `analyze_series` (which hands
-the chosen series to the vision engine from Step 4), and `write_report`, in
-whatever order and repetition it judges useful, then summarizes.
-
-```bash
-ollama serve
-python src/cmd/agent.py
-python src/cmd/agent.py --model qwen2.5 --engine ollama --vision-model llama3.2-vision
-```
-
-The orchestrator model is deliberately a *different, smaller, text-only* model
-from the vision model — it needs Ollama tool-calling support (e.g. `qwen2.5`,
-`llama3.1`), which most vision models don't have. Config via env:
-`OLLAMA_AGENT_MODEL` (default `qwen2.5`), `OLLAMA_HOST` (shared with Step 4).
+`analyze.py` builds the manifest/QC itself if they're missing, so it's runnable
+on its own too — pipeline order manifest -> qc -> analyze is just how it fills
+in the gaps, not a required sequence of commands.
 
 ## Privacy: everything runs locally
 
@@ -131,14 +148,15 @@ docker compose up --build
 ```
 
 Two local services start: `ollama` (model server; weights persist in a named
-volume, pulled at runtime — not baked into any image) and `app` (our pipeline).
-The app builds the manifest and runs the analysis, writing reports to `./output`.
-First run downloads the vision model once; later runs reuse it.
+volume, pulled at runtime — not baked into any image) and `app` (our pipeline,
+runs the agent loop by default), writing reports to `./output`. First run
+downloads both the orchestrator and vision models once; later runs reuse them.
 
 Ad-hoc commands:
 
 ```bash
 docker compose run --rm app python src/cmd/visualize.py --deep
+docker compose run --rm app python src/cmd/analyze.py     # fixed pipeline, no agent
 ```
 
 ## Important disclaimer

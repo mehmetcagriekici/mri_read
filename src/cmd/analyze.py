@@ -1,10 +1,11 @@
 """
-CLI entry point for Step 4 — the analysis orchestrator.
+CLI entry point for Step 4 — the fixed (non-agent) analysis orchestrator.
 
-All the real logic lives in mri_read.analyze; this just wires up argparse and
-the manifest.json / report.json / report.md file handling. Standalone: if
-manifest.json doesn't exist yet (or has no QC), this builds it first — you
-don't need to run manifest.py/qc.py separately first, though you still can.
+Development/debugging tool: runs the deterministic manifest -> qc -> analyze
+pipeline standalone (builds manifest.json/QC itself if missing) for testing
+the vision engine or slice selection in isolation, without an LLM
+orchestrator in the loop. The primary entry point for running the project is
+`src/cmd/agent.py`.
 
 Usage:
   python src/cmd/analyze.py                         # local ollama, one series per sequence
@@ -16,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import sys
 
 from mri_read.analyze import select_series, write_report
 from mri_read.engine import get_engine
@@ -51,10 +54,18 @@ def _load_or_build_manifest() -> dict:
 
 
 def main() -> None:
+    # See src/cmd/agent.py for why: mri_read/ logs via `logging`, this is
+    # where that becomes visible console output (plain, no level prefixes).
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", default="ollama",
                     help="ollama (local, default) | claude (non-local)")
     ap.add_argument("--model", default=None, help="engine model override")
+    ap.add_argument("--vision-timeout", type=int, default=None,
+                    help="seconds to wait for EACH per-series vision call (default "
+                         "600; raise this on slow CPU-only setups if you see a "
+                         "socket TimeoutError)")
     ap.add_argument("--slices", type=int, default=4,
                     help="slices per series (default 4)")
     ap.add_argument("--all-series", action="store_true",
@@ -76,7 +87,11 @@ def main() -> None:
     print(f"Selected {len(series)} series, {n_imgs} slice images. "
           f"Calling engine '{args.engine}'...")
 
-    kwargs = {"model": args.model} if args.model else {}
+    kwargs = {}
+    if args.model:
+        kwargs["model"] = args.model
+    if args.vision_timeout:
+        kwargs["timeout"] = args.vision_timeout
     engine = get_engine(args.engine, **kwargs)
     result = engine.analyze(study_meta, series)
 
