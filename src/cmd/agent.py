@@ -16,20 +16,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
-import sys
 
 from mri_read.agent import DEFAULT_HOST, DEFAULT_MODEL, PipelineError, run_agent
+from mri_read.logging_setup import configure_logging
 from mri_read.paths import OUT
 
 
 def main() -> None:
-    # mri_read/ modules log their own progress (model pulls, per-series vision
-    # calls, QC skips) via the stdlib logging module rather than print(); this
-    # is the CLI entry point that turns those into visible output, matching
-    # the plain, unprefixed look print() used to produce.
-    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
-
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=DEFAULT_MODEL,
                     help="text-reasoning model that synthesizes the final report "
@@ -54,7 +47,19 @@ def main() -> None:
                          "see a socket TimeoutError)")
     args = ap.parse_args()
 
+    # mri_read/ modules log their own progress (model pulls, per-series vision
+    # calls with duration, QC skips, stage timing) via the stdlib logging
+    # module rather than print(). Console output keeps the plain, unprefixed
+    # look print() used to produce; output/agent.log additionally gets a
+    # timestamped, appended copy -- a run that takes 30+ minutes on CPU-only
+    # hardware is often watched from a different terminal or backgrounded,
+    # so its timing needs to survive past whatever scrollback is still on
+    # screen. Set up after arg parsing so `--help` stays clean.
     OUT.mkdir(exist_ok=True)
+    log_path = OUT / "agent.log"
+    configure_logging(log_path)
+    print(f"Logging to console and {log_path}")
+
     engine_kwargs = {}
     if args.vision_model:
         engine_kwargs["model"] = args.vision_model
@@ -83,6 +88,7 @@ def main() -> None:
     print("\n=== Report summary ===")
     print(summary)
     print(f"\nReport written to {OUT / 'report.md'} and {OUT / 'report.json'}")
+    print(f"Full timing log: {log_path}")
 
 
 if __name__ == "__main__":

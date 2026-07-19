@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
 
 from mri_read.config import DEFAULT as CFG
 from mri_read.engine import AnalysisEngine, AnalysisResult, SeriesImages
@@ -15,6 +16,18 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_HOST = CFG.ollama_host
 DEFAULT_MODEL = CFG.vision_model
+
+# Real incident: a vision call's server-side generation never terminated (no
+# stop token reached -- a known failure mode for smaller quantized models,
+# e.g. a repetition loop). urlopen(timeout=...) only closes the CLIENT
+# connection when it expires; it can't cancel server-side work. With Ollama
+# running a single processing slot (-np 1) here, that one stuck generation
+# blocked every subsequent series' request from ever being served, so ALL
+# FIVE series in that run timed out, not just the stuck one. Capping the
+# reply length bounds worst-case generation time regardless of whether the
+# model ever finds a natural stop point -- the JSON contract in SYSTEM only
+# ever needs a few hundred tokens, so this is far above any legitimate reply.
+MAX_REPLY_TOKENS = 768
 
 
 class OllamaVisionEngine(AnalysisEngine):
@@ -63,7 +76,7 @@ class OllamaVisionEngine(AnalysisEngine):
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "options": {"temperature": 0.2},
+            "options": {"temperature": 0.2, "num_predict": MAX_REPLY_TOKENS},
         }, self.timeout)
         text = resp.get("message", {}).get("content", "")
         try:
@@ -97,10 +110,12 @@ class OllamaVisionEngine(AnalysisEngine):
         flags: list[str] = []
         raw_per_series: dict[str, dict] = {}
         errors: list[str] = []
+        phase_start = time.monotonic()
 
         for s in series:
             logger.info("vision: reading %s (%s, %d slices)...",
                        s.label, s.series, len(s.slice_pngs))
+            t0 = time.monotonic()
             try:
                 data = self._analyze_one(study_meta, s)
             except Exception as e:
@@ -110,9 +125,14 @@ class OllamaVisionEngine(AnalysisEngine):
                 # every other sequence's results. Nothing is swallowed
                 # silently: the error text is kept in `flags` and shows up in
                 # the final report.
+                elapsed = time.monotonic() - t0
+                logger.warning("vision: %s (%s) FAILED after %.1fs: %s",
+                              s.label, s.series, elapsed, e)
                 errors.append(f"{s.label}: {e}")
                 flags.append(f"{s.label}: analysis failed ({e})")
                 continue
+            logger.info("vision: %s (%s) done in %.1fs",
+                       s.label, s.series, time.monotonic() - t0)
             # s.label is ground truth: this call was scoped to exactly one
             # series' images (see _analyze_one's per-series split), so what
             # sequence it covered is never in question. The model has been
@@ -134,6 +154,10 @@ class OllamaVisionEngine(AnalysisEngine):
 
         if not raw_per_series and errors:
             raise RuntimeError(f"all series failed vision analysis: {'; '.join(errors)}")
+
+        logger.info("vision: all %d series done in %.1fs (%d succeeded, %d failed)",
+                   len(series), time.monotonic() - phase_start,
+                   len(raw_per_series), len(errors))
 
         return AnalysisResult(
             engine=f"{self.name}:{self.model}",

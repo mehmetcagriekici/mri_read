@@ -51,6 +51,27 @@ def test_analyze_one_forwards_configured_timeout_to_post(engine):
     assert mock_post.call_args[0][-1] == 42  # post(host, path, payload, timeout)
 
 
+def test_analyze_one_caps_reply_length():
+    """Regression test for a real incident: a stuck generation with no
+    output-length cap ran for 50+ minutes with a single Ollama processing
+    slot (-np 1), queuing every subsequent series behind it -- all 5 series
+    in that run timed out, not just the stuck one. num_predict bounds
+    worst-case generation time regardless of whether the model ever finds a
+    natural stop point.
+    """
+    from mri_read.ollama_vision.engine_impl import MAX_REPLY_TOKENS
+
+    with patch("mri_read.ollama_vision.engine_impl.ensure_model",
+              return_value="llava:13b"):
+        eng = OllamaVisionEngine(model="llava:13b", host="http://localhost:11434")
+    with patch("mri_read.ollama_vision.engine_impl.post",
+              return_value={"message": {"content": "{}"}}) as mock_post:
+        eng._analyze_one({}, _series("T2"))
+
+    payload = mock_post.call_args[0][2]  # post(host, path, payload, timeout)
+    assert payload["options"]["num_predict"] == MAX_REPLY_TOKENS
+
+
 def test_one_series_timeout_becomes_a_flag_not_a_crash(engine):
     """A per-series socket timeout must not stop the other series from being
     analyzed, and must not propagate out of analyze() -- it becomes a flag.
@@ -134,3 +155,38 @@ def test_placeholder_echo_observation_is_dropped_and_flagged(engine):
 
     assert result.observations == []
     assert any("dropped" in f and "hallucinated" in f for f in result.flags)
+
+
+# --- duration logging (see logging_setup for why this exists) --------------
+
+def test_successful_call_logs_its_duration(engine, caplog):
+    with patch("mri_read.ollama_vision.engine_impl.post",
+              return_value={"message": {"content": "{}"}}):
+        with caplog.at_level("INFO", logger="mri_read.ollama_vision.engine_impl"):
+            engine.analyze({}, [_series("T2")])
+
+    done_logs = [r.message for r in caplog.records if "T2 (Seri1) done in" in r.message]
+    assert len(done_logs) == 1
+
+
+def test_failed_call_logs_its_duration_as_a_warning(engine, caplog):
+    with patch("mri_read.ollama_vision.engine_impl.post",
+              side_effect=socket.timeout("timed out")):
+        with caplog.at_level("INFO", logger="mri_read.ollama_vision.engine_impl"):
+            with pytest.raises(RuntimeError):
+                engine.analyze({}, [_series("T2")])
+
+    failed_logs = [r for r in caplog.records if "FAILED after" in r.message]
+    assert len(failed_logs) == 1
+    assert failed_logs[0].levelname == "WARNING"
+
+
+def test_analyze_logs_an_overall_summary(engine, caplog):
+    with patch("mri_read.ollama_vision.engine_impl.post",
+              return_value={"message": {"content": "{}"}}):
+        with caplog.at_level("INFO", logger="mri_read.ollama_vision.engine_impl"):
+            engine.analyze({}, [_series("T2"), _series("T2 FLAIR", series="Seri2")])
+
+    summary_logs = [r.message for r in caplog.records if "all 2 series done" in r.message]
+    assert len(summary_logs) == 1
+    assert "2 succeeded, 0 failed" in summary_logs[0]

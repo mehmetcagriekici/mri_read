@@ -139,3 +139,41 @@ def test_clean_report_gets_a_computed_confidence():
 
     assert ctx.last_result.confidence == "high"
     assert ctx.last_result.impression == "No acute findings."
+
+
+# --- stage-level duration logging -------------------------------------------
+
+def test_run_logs_every_stage_with_a_duration(caplog):
+    fake_vision_result = AnalysisResult(engine="ollama:llava", sequences_reviewed=["T2"])
+    with patch("mri_read.agent.pipeline.get_engine") as mock_get_engine, \
+         patch("mri_read.agent.pipeline.ensure_model", return_value="meditron:7b"), \
+         patch("mri_read.agent.pipeline._synthesize",
+              return_value={"impression": "ok", "flags": []}):
+        mock_get_engine.return_value.analyze.return_value = fake_vision_result
+        with caplog.at_level("INFO", logger="mri_read.agent.pipeline"):
+            run_agent()
+
+    messages = [r.message for r in caplog.records]
+    assert any("starting run" in m for m in messages)
+    assert any("manifest + QC done in" in m for m in messages)
+    assert any("selected" in m and "series-images" in m for m in messages)
+    assert any("vision phase" in m and "done in" in m for m in messages)
+    assert any("synthesis phase" in m and "done in" in m for m in messages)
+    assert any("run complete in" in m and "confidence:" in m for m in messages)
+
+
+def test_correlation_guard_suppression_is_logged_as_a_warning(caplog):
+    concerning_obs = [{"sequence": "T2", "finding": "this appears to be a tumor",
+                       "location": "frontal lobe", "confidence": "high"}]
+    fake_vision_result = AnalysisResult(engine="ollama:llava", sequences_reviewed=["T2"],
+                                        observations=concerning_obs)
+    with patch("mri_read.agent.pipeline.get_engine") as mock_get_engine, \
+         patch("mri_read.agent.pipeline.ensure_model", return_value="meditron:7b"), \
+         patch("mri_read.agent.pipeline._synthesize",
+              return_value={"impression": "ok", "flags": []}):
+        mock_get_engine.return_value.analyze.return_value = fake_vision_result
+        with caplog.at_level("INFO", logger="mri_read.agent.pipeline"):
+            run_agent()
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("suppressed" in r.message for r in warnings)

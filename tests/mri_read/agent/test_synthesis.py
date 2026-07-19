@@ -1,4 +1,7 @@
+import socket
 from unittest.mock import patch
+
+import pytest
 
 from mri_read.agent.synthesis import _synthesize
 from mri_read.engine import AnalysisResult
@@ -19,6 +22,20 @@ def test_synthesize_forwards_timeout_and_returns_parsed_json():
 
     assert result == {"impression": "ok", "flags": []}
     assert mock_post.call_args[0][-1] == 77
+
+
+def test_synthesize_caps_reply_length():
+    """See ollama_vision.test_engine_impl's matching test for the real
+    incident this guards against."""
+    from mri_read.agent.synthesis import MAX_REPLY_TOKENS
+
+    manifest = {"series": []}
+    with patch("mri_read.agent.synthesis.post",
+              return_value={"message": {"content": '{"impression": "ok", "flags": []}'}}) as mock_post:
+        _synthesize("meditron:7b", "http://x", {}, manifest, _vision_result(), 10)
+
+    payload = mock_post.call_args[0][2]  # post(host, path, payload, timeout)
+    assert payload["options"]["num_predict"] == MAX_REPLY_TOKENS
 
 
 def test_synthesize_tolerates_malformed_reply():
@@ -58,3 +75,26 @@ def test_synthesize_treats_explicit_null_flags_as_empty_list():
         result = _synthesize("meditron:7b", "http://x", {}, manifest, _vision_result(), 10)
 
     assert result["flags"] == []
+
+
+def test_successful_call_logs_its_duration(caplog):
+    manifest = {"series": []}
+    with patch("mri_read.agent.synthesis.post",
+              return_value={"message": {"content": '{"impression": "ok", "flags": []}'}}):
+        with caplog.at_level("INFO", logger="mri_read.agent.synthesis"):
+            _synthesize("meditron:7b", "http://x", {}, manifest, _vision_result(), 10)
+
+    done_logs = [r.message for r in caplog.records if "meditron:7b done in" in r.message]
+    assert len(done_logs) == 1
+
+
+def test_failed_call_logs_its_duration_as_a_warning_and_still_raises(caplog):
+    manifest = {"series": []}
+    with patch("mri_read.agent.synthesis.post", side_effect=socket.timeout("timed out")):
+        with caplog.at_level("INFO", logger="mri_read.agent.synthesis"):
+            with pytest.raises(socket.timeout):
+                _synthesize("meditron:7b", "http://x", {}, manifest, _vision_result(), 10)
+
+    failed_logs = [r for r in caplog.records if "FAILED after" in r.message]
+    assert len(failed_logs) == 1
+    assert failed_logs[0].levelname == "WARNING"

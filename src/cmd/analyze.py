@@ -17,11 +17,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
-import sys
 
 from mri_read.analyze import select_series, write_report
 from mri_read.engine import get_engine
+from mri_read.logging_setup import configure_logging
 from mri_read.manifest import build_manifest
 from mri_read.paths import OUT
 from mri_read.qc import run_qc
@@ -54,10 +53,6 @@ def _load_or_build_manifest() -> dict:
 
 
 def main() -> None:
-    # See src/cmd/agent.py for why: mri_read/ logs via `logging`, this is
-    # where that becomes visible console output (plain, no level prefixes).
-    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
-
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", default="ollama",
                     help="ollama (local, default) | claude (non-local)")
@@ -73,6 +68,13 @@ def main() -> None:
     ap.add_argument("--skip-qc-warn", action="store_true",
                     help="skip series that QC flagged (needs qc in manifest)")
     args = ap.parse_args()
+
+    # See src/cmd/agent.py's logging_setup use for the full rationale. A
+    # separate log file (not agent.log) since this is a different tool --
+    # keeps a fixed-pipeline debug run's timing from interleaving with an
+    # agent run's. Set up after arg parsing so `--help` stays clean.
+    OUT.mkdir(exist_ok=True)
+    configure_logging(OUT / "analyze.log")
 
     try:
         manifest = _load_or_build_manifest()
