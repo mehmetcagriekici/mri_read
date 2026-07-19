@@ -18,6 +18,24 @@ logger = logging.getLogger(__name__)
 # generation's worst case.
 MAX_REPLY_TOKENS = 512
 
+# How much of a failed-to-parse reply to put in the log. Not for the report
+# (see the "unknown" fallback below) -- just enough for a human reading
+# agent.log to diagnose the failure without needing to reproduce it live.
+_RAW_LOG_CHARS = 500
+
+
+def _looks_like_prompt_echo(text: str, user_message: str) -> bool:
+    """True if `text` (or a meaningful chunk of it) is copied verbatim from
+    the user message we sent, rather than a real reply. Same failure mode as
+    ollama_vision.sanitize's prompt-echo detection, but scoped to the whole
+    reply instead of individual observation fields -- a real incident had
+    meditron:7b echo the entire input JSON payload back and get cut off
+    mid-echo by MAX_REPLY_TOKENS, producing text that LOOKS like a parse
+    failure but is actually the model not replying at all.
+    """
+    t = text.strip()
+    return len(t) > 40 and t in user_message
+
 
 def _synthesize(model: str, host: str, study_meta: dict, manifest: dict,
                 vision_result: AnalysisResult, timeout: int) -> dict:
@@ -72,6 +90,11 @@ def _synthesize(model: str, host: str, study_meta: dict, manifest: dict,
         # schema), which would otherwise land verbatim in the final report
         # looking like real analysis. "unknown" makes the failure visible
         # instead of silently passing garbage through.
-        return {"impression": "unknown", "flags": ["unparsed"]}
+        echo = _looks_like_prompt_echo(text, messages[1]["content"])
+        logger.warning(
+            "synthesis: %s reply failed to parse as JSON (%s) -- raw (truncated): %r",
+            model, "prompt echo" if echo else "malformed", text[:_RAW_LOG_CHARS])
+        return {"impression": "unknown",
+               "flags": ["unparsed_echo" if echo else "unparsed"]}
     synth["flags"] = synth.get("flags") or []           # tolerate an explicit null
     return synth

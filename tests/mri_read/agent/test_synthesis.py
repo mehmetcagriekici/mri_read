@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mri_read.agent.synthesis import _synthesize
+from mri_read.agent.synthesis import _looks_like_prompt_echo, _synthesize
 from mri_read.engine import AnalysisResult
 
 
@@ -98,3 +98,65 @@ def test_failed_call_logs_its_duration_as_a_warning_and_still_raises(caplog):
     failed_logs = [r for r in caplog.records if "FAILED after" in r.message]
     assert len(failed_logs) == 1
     assert failed_logs[0].levelname == "WARNING"
+
+
+# --- prompt-echo detection on parse failure ---------------------------------
+# Regression coverage for a real incident: meditron:7b's reply, on a parse
+# failure, turned out to be the entire input JSON payload echoed back and cut
+# off mid-echo by MAX_REPLY_TOKENS -- not a malformed real answer. Confirmed
+# by reproducing the live call and reading the raw (previously unlogged) text.
+
+def test_looks_like_prompt_echo_detects_verbatim_substring():
+    user_message = '{"study": {"body_part": "BRAIN"}, "series": [1, 2, 3]}'
+    truncated_echo = '{"study": {"body_part": "BRAIN"}, "series":'
+    assert _looks_like_prompt_echo(truncated_echo, user_message) is True
+
+
+def test_looks_like_prompt_echo_false_for_a_real_reply():
+    user_message = '{"study": {"body_part": "BRAIN"}, "series": [1, 2, 3]}'
+    assert _looks_like_prompt_echo("Findings are unremarkable overall.", user_message) is False
+
+
+def test_looks_like_prompt_echo_ignores_short_incidental_overlap():
+    """A short, generic substring match (e.g. a stray '{"') shouldn't trip
+    the echo detector -- only a substantial verbatim chunk should."""
+    user_message = '{"study": {"body_part": "BRAIN"}}'
+    assert _looks_like_prompt_echo('{"', user_message) is False
+
+
+def test_synthesize_flags_prompt_echo_reply_distinctly_from_generic_malformed():
+    """A real incident: meditron:7b echoed the whole input payload back and
+    got cut off mid-echo, which superficially looks like ordinary malformed
+    JSON but is actually a distinct failure mode (the model never answered
+    at all) worth flagging differently.
+    """
+    manifest = {"series": [{"series": "Seri1", "label": "T2",
+                            "use_for_analysis": True, "qc": {"status": "pass"}}]}
+    vision_result = _vision_result()
+
+    def fake_post(host, path, payload, timeout):
+        echoed = payload["messages"][1]["content"][:200]  # simulate truncation mid-echo
+        return {"message": {"content": echoed}}
+
+    with patch("mri_read.agent.synthesis.post", side_effect=fake_post):
+        result = _synthesize("meditron:7b", "http://x", {}, manifest, vision_result, 10)
+
+    assert result["impression"] == "unknown"
+    assert result["flags"] == ["unparsed_echo"]
+
+
+def test_synthesize_logs_raw_reply_on_parse_failure(caplog):
+    """Previously the raw failing reply was logged nowhere -- a real parse
+    failure was only diagnosable by reproducing the live call by hand. Now
+    a truncated copy goes to the log so the failure is inspectable after the
+    fact."""
+    manifest = {"series": []}
+    with patch("mri_read.agent.synthesis.post",
+              return_value={"message": {"content": "not json at all, definitely malformed"}}):
+        with caplog.at_level("WARNING", logger="mri_read.agent.synthesis"):
+            _synthesize("meditron:7b", "http://x", {}, manifest, _vision_result(), 10)
+
+    raw_logs = [r.message for r in caplog.records if "failed to parse as JSON" in r.message]
+    assert len(raw_logs) == 1
+    assert "not json at all" in raw_logs[0]
+    assert "malformed" in raw_logs[0]

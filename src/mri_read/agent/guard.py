@@ -84,8 +84,65 @@ def _locations_overlap(a: object, b: object) -> bool:
     return bool(words_a & words_b)
 
 
+def _is_dwi_sequence(sequence: object) -> bool:
+    return isinstance(sequence, str) and sequence.upper().startswith("DWI")
+
+
+_NEGATIVE_FINDING_RE = re.compile(
+    r"^\s*(no\b|none\b|unremarkable|no abnormal|no significant|no evidence|no focal)",
+    re.IGNORECASE,
+)
+
+
+def _is_negative_finding(text: object) -> bool:
+    """True if `finding` reads as an explicit negative ("no abnormal signal
+    observed") rather than reporting something. Deliberately loose -- this
+    only needs to match this project's own vision-prompt phrasing style
+    (see ollama_vision/prompts.py), not parse arbitrary radiology prose.
+    """
+    return isinstance(text, str) and bool(_NEGATIVE_FINDING_RE.match(text.strip()))
+
+
+def _check_dwi_correlation(observations: list[dict]) -> list[str]:
+    """Flag (never suppress) a DWI finding that reports something but has no
+    same-location correlate on any non-DWI sequence.
+
+    Real radiology practice cross-reads DWI against FLAIR/T1 for exactly this
+    reason -- e.g. DWI-positive/FLAIR-negative is part of how an acute
+    stroke gets timed, and a DWI-only signal without any structural correlate
+    can also just be artifact. This project can't make that clinical
+    judgment, but it CAN point out, deterministically, when the cross-
+    sequence context a radiologist would look for isn't present in the other
+    observations. This is intentionally separate from the suppression logic
+    above: "restricted diffusion" is not a CONCERNING_TERMS diagnostic
+    conclusion, so nothing here gets redacted -- only annotated, since a
+    missing correlate doesn't mean the finding is false, only that it's
+    unconfirmed by another sequence.
+    """
+    flags: list[str] = []
+    for obs in observations:
+        if not _is_dwi_sequence(obs.get("sequence")) or _is_negative_finding(obs.get("finding")):
+            continue
+        correlate = any(
+            not _is_dwi_sequence(other.get("sequence"))
+            and not _is_negative_finding(other.get("finding"))
+            and _locations_overlap(obs.get("location"), other.get("location"))
+            for other in observations
+        )
+        if not correlate:
+            sequence = obs.get("sequence", "?")
+            location = obs.get("location", "?")
+            flags.append(
+                f"{sequence}: finding at {location!r} has no corresponding finding on "
+                "any other reviewed sequence — no structural (e.g. FLAIR/T1) correlate "
+                "for this diffusion finding"
+            )
+    return flags
+
+
 def apply_correlation_guard(observations: list[dict]) -> tuple[list[dict], list[str]]:
-    """Suppress concerning findings that no other sequence corroborates.
+    """Suppress concerning findings that no other sequence corroborates, and
+    flag (without suppressing) DWI findings lacking a structural correlate.
 
     A finding is corroborated if ANOTHER observation, from a DIFFERENT
     sequence, also mentions a concerning term AND references an overlapping
@@ -125,6 +182,7 @@ def apply_correlation_guard(observations: list[dict]) -> tuple[list[dict], list[
         suppressed["confidence"] = "low"
         adjusted.append(suppressed)
 
+    flags.extend(_check_dwi_correlation(observations))
     return adjusted, flags
 
 

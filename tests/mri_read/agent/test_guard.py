@@ -97,6 +97,61 @@ def test_empty_observations_list():
     assert apply_correlation_guard([]) == ([], [])
 
 
+# --- DWI/structural correlation flag ----------------------------------------
+# Regression coverage for a real observation: a DWI finding ("restricted
+# diffusion") had no code cross-referencing it against FLAIR/T1 at all --
+# unlike the suppression logic above, "restricted diffusion" isn't a
+# CONCERNING_TERMS diagnostic claim, so nothing should be redacted here, only
+# flagged when the cross-sequence correlate a radiologist would look for is
+# missing from the other observations.
+
+def test_dwi_finding_without_structural_correlate_is_flagged_not_suppressed():
+    obs = [
+        _obs("DWI (b=1000.0)", "Restricted diffusion observed in a small area.",
+            location="left parietal lobe"),
+        _obs("T2 FLAIR", "No abnormal signal intensity observed.",
+            location="throughout the brain parenchyma"),
+    ]
+    adjusted, flags = apply_correlation_guard(obs)
+    assert adjusted[0]["finding"] == obs[0]["finding"]  # never redacted
+    assert any("DWI (b=1000.0)" in f and "no structural" in f.lower() for f in flags)
+
+
+def test_dwi_finding_with_overlapping_structural_correlate_is_not_flagged():
+    obs = [
+        _obs("DWI (b=1000.0)", "Restricted diffusion observed.", location="left parietal lobe"),
+        _obs("T2 FLAIR", "Hyperintense signal noted.", location="left parietal lobe"),
+    ]
+    _, flags = apply_correlation_guard(obs)
+    assert flags == []
+
+
+def test_negative_dwi_finding_is_not_flagged_for_missing_correlate():
+    obs = [_obs("DWI", "No abnormal signal intensity observed.", location="left parietal lobe")]
+    _, flags = apply_correlation_guard(obs)
+    assert flags == []
+
+
+def test_correlate_must_be_from_a_non_dwi_sequence():
+    """A second DWI-derived observation (e.g. the ADC map) doesn't count as
+    a structural correlate -- it's still diffusion data, not FLAIR/T1."""
+    obs = [
+        _obs("DWI (b=1000.0)", "Restricted diffusion observed.", location="left parietal lobe"),
+        _obs("DWI ADC map", "Low ADC signal noted.", location="left parietal lobe"),
+    ]
+    _, flags = apply_correlation_guard(obs)
+    assert any("DWI (b=1000.0)" in f for f in flags)
+
+
+def test_correlate_at_a_different_location_does_not_count():
+    obs = [
+        _obs("DWI (b=1000.0)", "Restricted diffusion observed.", location="left parietal lobe"),
+        _obs("T2 FLAIR", "Hyperintense signal noted.", location="right occipital lobe"),
+    ]
+    _, flags = apply_correlation_guard(obs)
+    assert any("DWI (b=1000.0)" in f for f in flags)
+
+
 # --- guard_final_impression --------------------------------------------------
 
 MANIFEST = {"series": [
