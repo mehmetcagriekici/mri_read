@@ -177,3 +177,36 @@ def test_correlation_guard_suppression_is_logged_as_a_warning(caplog):
 
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert any("suppressed" in r.message for r in warnings)
+
+
+def test_dwi_correlation_flag_alone_does_not_log_a_false_suppression_warning(caplog):
+    """Regression test for a real bug: a DWI finding lacking a structural
+    correlate produces a flag from apply_correlation_guard, same as an
+    actual suppression -- but logging len(correlation_flags) as "suppressed"
+    claimed a redaction happened even though nothing in `observations` was
+    actually changed. Confirmed live: a real run logged "correlation guard
+    suppressed 1 uncorroborated claim(s)" when the only flag was the DWI/
+    structural-correlation note, and no observation's finding was
+    REDACTED_FINDING. The warning must only fire on an ACTUAL suppression.
+    """
+    from mri_read.agent.guard import REDACTED_FINDING
+
+    dwi_only_obs = [
+        {"sequence": "DWI", "finding": "Restricted diffusion observed.",
+         "location": "left parietal lobe", "confidence": "moderate"},
+        {"sequence": "T2 FLAIR", "finding": "No abnormal signal intensity observed.",
+         "location": "whole brain", "confidence": "low"},
+    ]
+    fake_vision_result = AnalysisResult(engine="ollama:llava", sequences_reviewed=["DWI", "T2 FLAIR"],
+                                        observations=dwi_only_obs)
+    with patch("mri_read.agent.pipeline.get_engine") as mock_get_engine, \
+         patch("mri_read.agent.pipeline.ensure_model", return_value="meditron:7b"), \
+         patch("mri_read.agent.pipeline._synthesize",
+              return_value={"impression": "ok", "flags": []}):
+        mock_get_engine.return_value.analyze.return_value = fake_vision_result
+        with caplog.at_level("INFO", logger="mri_read.agent.pipeline"):
+            _, ctx = run_agent()
+
+    assert not any(o["finding"] == REDACTED_FINDING for o in ctx.last_result.observations)
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert not any("suppressed" in r.message for r in warnings)

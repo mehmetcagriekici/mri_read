@@ -6,7 +6,8 @@ import logging
 import time
 
 from mri_read.agent.context import AgentContext, PipelineError
-from mri_read.agent.guard import apply_correlation_guard, guard_final_impression
+from mri_read.agent.guard import (REDACTED_FINDING, apply_correlation_guard,
+                                  guard_final_impression)
 from mri_read.agent.synthesis import _synthesize
 from mri_read.analyze import select_series, write_report
 from mri_read.config import DEFAULT as CFG
@@ -86,9 +87,17 @@ def run_agent(model: str = DEFAULT_MODEL, host: str = DEFAULT_HOST,
     vision_result.observations, correlation_flags = apply_correlation_guard(
         vision_result.observations)
     vision_result.flags = list(dict.fromkeys(vision_result.flags + correlation_flags))
-    if correlation_flags:
+    # correlation_flags mixes two different things (see agent.guard): actual
+    # suppressions of an uncorroborated CONCERNING_TERMS claim, and purely
+    # informational DWI/structural-correlation notes that never touch an
+    # observation's finding text. Count REDACTED_FINDING occurrences
+    # directly rather than len(correlation_flags), which would otherwise
+    # log "suppressed" even when nothing was actually redacted.
+    suppressed_count = sum(1 for o in vision_result.observations
+                           if o.get("finding") == REDACTED_FINDING)
+    if suppressed_count:
         logger.warning("agent: correlation guard suppressed %d uncorroborated claim(s)",
-                       len(correlation_flags))
+                       suppressed_count)
 
     t0 = time.monotonic()
     try:
