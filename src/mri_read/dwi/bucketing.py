@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pydicom
 
-from mri_read.mri import DATA_DIR, read_bvalue
+from mri_read.mri import read_bvalue, series_dir
 
 
 def _bucket_key(b: float | None) -> float | None:
@@ -42,7 +42,7 @@ def count_bvalue_buckets(name: str) -> int:
     count_bvalue_buckets_from_values() when they do, to avoid re-reading
     every header from disk.
     """
-    files = sorted((DATA_DIR / name).glob("*.dcm"))
+    files = sorted(series_dir(name).glob("*.dcm"))
     bvalues = []
     for f in files:
         try:

@@ -37,11 +37,19 @@ layer directly instead of shelling out to scripts:
 ```
 src/
   mri_read/    # service logic — importable, no argparse/__main__ here
-    paths.py, mri.py, dwi.py, engine.py, manifest.py, qc.py, agent.py,
-    analyze.py, ollama_vision.py, ollama_client.py, claude_vision.py,
-    visualize.py, explore.py
-  cmd/         # thin CLI wrappers, one per script, e.g.:
+    paths/, mri/, dwi/, engine/, manifest/, qc/, agent/, analyze/,
+    ollama_vision/, ollama_client/, claude_vision/, visualize/, explore/,
+    config/
+    # each is a subpackage (folder + __init__.py), split by responsibility
+    # into files inside it — e.g. mri/ separates disk-reading (loading.py)
+    # from tag normalization (tags.py) from windowing (windowing.py). Each
+    # __init__.py re-exports the subpackage's public names, so callers
+    # always do `from mri_read.mri import load_series`, never reach into
+    # the internal files directly.
+  cmd/         # thin CLI wrappers, one per subpackage, e.g.:
     explore.py, visualize.py, manifest.py, qc.py, analyze.py, agent.py, dwi.py
+tests/
+  mri_read/    # mirrors src/mri_read/'s layout 1:1, one test_*.py per source file
 ```
 
 `pyproject.toml` makes `mri_read` pip-installable (`pip install -e .`), so both
@@ -114,6 +122,52 @@ content-aware slice selection (skips near-empty slices), and DWI handling
 To add a specialized brain-MRI model later, implement `AnalysisEngine.analyze()`
 in a new file and register it in `get_engine()` — nothing else changes.
 
+### Performance: CPU-only vision inference is slow — read this if a run seems stuck
+
+**If `agent.py` appears to hang or times out, this is very likely why, and it's
+not a bug.** Measured on this project's own CPU-only dev machine: a single
+per-series vision call to `llava:13b` (4 images) took **434.6 seconds** — over
+7 minutes — for one sequence. `run_agent()` makes one such call per selected
+sequence type (typically 5: DWI, T1(IR), T2, T2 FLAIR, 3D T1), so a full run's
+vision-analysis phase alone can cost **30-40+ minutes** before text-synthesis
+even starts. The default `--vision-timeout` (600s) is close enough to that
+measured number that ordinary variance (more images, system load, a longer
+reply) can genuinely exceed it. This is inherent to running a 13B-parameter
+vision-language model on hardware with no GPU — not something a code fix
+resolves.
+
+What actually helps, roughly in order of impact:
+
+1. **Use a GPU if you have one.** By far the biggest lever — CPU inference on
+   a model this size is the whole problem. If Ollama can see a GPU, point
+   `OLLAMA_HOST` at that instance instead of a CPU-only one.
+2. **Use a smaller/faster vision model** if you're stuck on CPU. `llava:13b`
+   is the default because it was already available in this project's dev
+   environment, not because it's the fastest reasonable choice — try:
+   ```bash
+   python src/cmd/agent.py --vision-model llava:7b       # same family, ~half the params
+   python src/cmd/agent.py --vision-model qwen2.5vl:7b    # already referenced elsewhere in this repo
+   python src/cmd/agent.py --vision-model moondream       # much smaller/faster, lower quality
+   ```
+   Smaller models trade off analysis quality for speed — for a research
+   prototype that's often the right trade, but re-check output quality (see
+   the `flags`/`observations` in `output/report.md`) before assuming a faster
+   model is "good enough."
+3. **Raise the timeouts** if you're keeping the default (or another large)
+   model — 600s/900s were reasonable-looking defaults before this was
+   measured; they're close to the actual latency, not comfortably above it:
+   ```bash
+   python src/cmd/agent.py --vision-timeout 1200 --synth-timeout 1200
+   ```
+4. **Reduce `--slices`** (default 4) to cut per-call image count, e.g.
+   `--slices 2` — fewer images per call means less compute per call, at the
+   cost of a coarser look at each sequence.
+
+See `CLAUDE.md`'s Performance section for the full measured cost breakdown,
+including two smaller code-level fixes (deduped a redundant windowing
+computation, added a stall timeout to model pulls) that were real but small
+next to vision-call latency itself.
+
 ## Running pipeline stages individually (development / debugging)
 
 `manifest.py`, `qc.py`, and `analyze.py` (Steps 3, 3b, 4) are the deterministic
@@ -172,6 +226,20 @@ source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e . --no-deps    # registers the mri_read package for import
 ```
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt   # adds pytest on top of the runtime deps
+pytest
+```
+
+Fast (~4s), safe to run anywhere: no disk, no network by default. Two
+marker-gated categories opt in to more: `@pytest.mark.data` (needs
+`mri_test_data/` on disk, auto-skipped if absent) and `@pytest.mark.ollama`
+(real CPU inference against a live local Ollama server — **minutes** per
+test, always skipped unless you pass `pytest --run-ollama`). See
+`CLAUDE.md`'s Architecture section for more.
 
 ## Running step 1
 

@@ -10,6 +10,15 @@ from mri_read.ollama_client.resolve import resolve_model
 
 logger = logging.getLogger(__name__)
 
+# Per-read (not total-duration) stall timeout for /api/pull. urlopen's
+# `timeout` bounds EACH individual socket read, not the whole request, so a
+# multi-GB download that keeps streaming progress lines every few seconds
+# never trips this -- only a connection that goes completely silent (dropped
+# connection, hung server) for this long does. Previously this had no
+# timeout at all: a stalled pull would hang forever with zero indication,
+# rather than failing with a clear error the caller could act on.
+PULL_STALL_TIMEOUT = 120
+
 
 def model_present(host: str, model: str) -> bool:
     """Is `model` (or some tag of it) already downloaded?"""
@@ -37,7 +46,7 @@ def ensure_model(host: str, model: str) -> str:
         data=json.dumps({"name": model, "stream": True}).encode(),
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=None) as r:
+    with urllib.request.urlopen(req, timeout=PULL_STALL_TIMEOUT) as r:
         for line in r:
             try:
                 status = json.loads(line).get("status", "")

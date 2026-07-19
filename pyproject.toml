@@ -14,3 +14,14 @@ requires-python = ">=3.11"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["mri_read*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# "data" = needs mri_test_data/ on disk (gitignored, not always present).
+# "ollama" = needs a live local Ollama server with models pulled — real
+# vision/text inference, seconds-to-minutes per test. Both are opt-in so
+# `pytest` alone stays fast and runs anywhere; see tests/conftest.py.
+markers = [
+    "data: requires mri_test_data/ on disk",
+    "ollama: requires a live local Ollama server (slow, real inference)",
+]

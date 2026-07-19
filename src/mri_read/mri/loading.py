@@ -10,7 +10,7 @@ import pydicom
 from mri_read.mri.geometry import _slice_position
 from mri_read.mri.tags import extract_tags
 from mri_read.mri.types import Series
-from mri_read.paths import DATA_DIR
+from mri_read.paths import series_dir
 
 
 @lru_cache(maxsize=None)
@@ -31,7 +31,7 @@ def load_series(name: str) -> Series:
     3D T1 gets decoded from disk twice back to back. Callers must treat the
     returned Series as read-only; the array is shared across callers.
     """
-    folder = DATA_DIR / name
+    folder = series_dir(name)
     files = sorted(folder.glob("*.dcm"))
     if not files:
         raise FileNotFoundError(f"No .dcm files in {folder}")
@@ -70,7 +70,7 @@ def inspect_series(name: str) -> dict:
 
     Returns {"name", "n_slices", "tags"}.
     """
-    folder = DATA_DIR / name
+    folder = series_dir(name)
     files = sorted(folder.glob("*.dcm"))
     ds = None
     for f in files:

@@ -48,12 +48,12 @@ from mri_read.mri.tags import extract_tags
 from mri_read.mri.types import Series
 from mri_read.mri.windowing import (apply_window, volume_window_bounds,
                                     window_to_uint8)
-from mri_read.paths import DATA_DIR
+from mri_read.paths import DATA_DIR, series_dir
 
 __all__ = [
     "Series", "DATA_DIR",
     "load_series", "extract_tags", "inspect_series", "list_series",
     "plane_from_orientation", "_slice_position",
     "window_to_uint8", "volume_window_bounds", "apply_window",
-    "foreground_fraction", "read_bvalue",
+    "foreground_fraction", "read_bvalue", "series_dir",
 ]

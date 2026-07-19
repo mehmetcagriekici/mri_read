@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pydicom
 
-from mri_read.mri import DATA_DIR, _slice_position, read_bvalue
+from mri_read.mri import _slice_position, read_bvalue, series_dir
 
 
 def load_by_bvalue(name: str) -> dict[float, np.ndarray]:
@@ -15,7 +15,7 @@ def load_by_bvalue(name: str) -> dict[float, np.ndarray]:
     b-value, sort each group by geometric position, and stack it. Slices with no
     b-value tag are bucketed under -1.0. Returns {b_value: volume}.
     """
-    files = sorted((DATA_DIR / name).glob("*.dcm"))
+    files = sorted(series_dir(name).glob("*.dcm"))
     rows = []
     for f in files:
         try:

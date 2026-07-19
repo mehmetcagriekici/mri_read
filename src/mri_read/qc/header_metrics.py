@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pydicom
 
-from mri_read.mri import DATA_DIR, _slice_position, read_bvalue
+from mri_read.mri import _slice_position, read_bvalue, series_dir
 
 
 def _positions_and_instances(name: str):
@@ -16,7 +16,7 @@ def _positions_and_instances(name: str):
     None), read from the same headers so a DWI-candidate ranking check later
     (analyze.py's _rank_key) doesn't have to re-open every file on disk.
     """
-    files = sorted((DATA_DIR / name).glob("*.dcm"))
+    files = sorted(series_dir(name).glob("*.dcm"))
     heads = []
     for f in files:
         try:

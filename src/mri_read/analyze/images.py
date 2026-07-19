@@ -39,5 +39,8 @@ def build_series_images(row: dict, slices: int) -> list[SeriesImages]:
         label=row["label"],
         plane=row.get("plane", "?"),
         slice_indices=idx,
-        slice_pngs=volume_to_pngs(s.volume, idx),
+        # s.window_bounds is cached on the Series -- if qc.run_qc() already
+        # ran on this series (the normal agent/analyze flow), this reuses
+        # its computation instead of recomputing the same percentile pass.
+        slice_pngs=volume_to_pngs(s.volume, idx, bounds=s.window_bounds),
     )]

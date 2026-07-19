@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from mri_read.dwi import count_bvalue_buckets_from_values
-from mri_read.mri import foreground_fraction, load_series, volume_window_bounds
+from mri_read.mri import foreground_fraction, load_series
 from mri_read.qc.header_metrics import _positions_and_instances
 from mri_read.qc.signal_metrics import _background_snr
 
@@ -46,14 +46,19 @@ def run_qc(name: str) -> dict:
 
     # The remaining checks need actual pixels, so load the full volume now.
     try:
-        vol = load_series(name).volume
+        series = load_series(name)
+        vol = series.volume
     except Exception as e:                           # noqa: BLE001
         flags.append(f"load-failed:{e}")
         return {"flags": flags, "metrics": metrics, "status": "error"}
 
     # 3) LOW CONTRAST: the foreground window width relative to its magnitude. A
     #    nearly-flat volume (little to see) scores low.
-    lo, hi = volume_window_bounds(vol)
+    # series.window_bounds is cached on the Series instance -- analyze's
+    # slice encoding reuses the same cached value for this series instead of
+    # recomputing the same expensive percentile a second time (see
+    # mri.types.Series.window_bounds).
+    lo, hi = series.window_bounds
     rng = (hi - lo) / (abs(hi) + 1e-6)
     metrics["contrast"] = round(float(rng), 3)
     if rng < 0.15:
