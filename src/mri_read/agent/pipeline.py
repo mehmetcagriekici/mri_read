@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from mri_read.agent.context import AgentContext, PipelineError
+from mri_read.agent.guard import apply_correlation_guard, guard_final_impression
 from mri_read.agent.synthesis import _synthesize
 from mri_read.analyze import select_series, write_report
 from mri_read.config import DEFAULT as CFG
@@ -63,6 +64,14 @@ def run_agent(model: str = DEFAULT_MODEL, host: str = DEFAULT_HOST,
         # traceback) so the caller can still persist that partial work.
         raise PipelineError(f"vision engine failed: {e}", ctx) from e
 
+    # Deterministic guard, pass 1 (no model call): suppress any vision
+    # observation asserting a diagnostic-sounding claim that no OTHER
+    # sequence corroborates, before it ever reaches the text-synthesis
+    # model. See agent.guard's module docstring for the full rationale.
+    vision_result.observations, correlation_flags = apply_correlation_guard(
+        vision_result.observations)
+    vision_result.flags = list(dict.fromkeys(vision_result.flags + correlation_flags))
+
     try:
         text_model = ensure_model(host, model)          # resolve to exact pulled tag
         synth = _synthesize(text_model, host, study_meta, ctx.manifest, vision_result, timeout)
@@ -73,12 +82,23 @@ def run_agent(model: str = DEFAULT_MODEL, host: str = DEFAULT_HOST,
         # as PipelineError, not swallowed.
         raise PipelineError(f"text-synthesis model failed: {e}", ctx) from e
 
+    # Deterministic guard, pass 2: the same check against the SYNTHESIZED
+    # prose (a different model than the one that produced the observations,
+    # so it needs its own pass), plus a manifest-consistency check and the
+    # overall confidence -- computed here, never trusted from either model's
+    # self-report.
+    raw_impression = synth.get("impression") or vision_result.impression
+    final_impression, confidence, impression_flags = guard_final_impression(
+        raw_impression, vision_result.observations, ctx.manifest)
+
     ctx.last_result = AnalysisResult(
         engine=f"{vision_result.engine} + text:{text_model}",
         sequences_reviewed=vision_result.sequences_reviewed,
         observations=vision_result.observations,
-        impression=synth.get("impression") or vision_result.impression,
-        flags=list(dict.fromkeys(vision_result.flags + synth.get("flags", []))),
+        impression=final_impression,
+        confidence=confidence,
+        flags=list(dict.fromkeys(
+            vision_result.flags + synth.get("flags", []) + impression_flags)),
         disclaimer=vision_result.disclaimer,
         raw={"vision": vision_result.raw, "synthesis": synth},
     )

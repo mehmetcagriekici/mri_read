@@ -1,7 +1,7 @@
-"""filter_hallucinated_observations: catching well-formed-JSON hallucinations
-that parse_json_reply's syntax check can't catch -- see the real incident
-this guards against: llava:13b echoed its own prompt's example schema back
-as if it were a genuine observation.
+"""filter_hallucinated_observations: strict schema enforcement plus catching
+well-formed-JSON hallucinations that parse_json_reply's syntax check can't
+catch -- see the real incident this guards against: llava:13b echoed its own
+prompt's example schema back as if it were a genuine observation.
 """
 
 from __future__ import annotations
@@ -69,19 +69,55 @@ def test_mixed_real_and_hallucinated_observations_only_drops_the_bad_one():
     assert dropped == 1
 
 
-def test_non_string_confidence_does_not_crash():
+def test_non_string_confidence_is_dropped_not_guessed():
+    """A missing/unreadable confidence must not silently pass through --
+    "no claim" is fine, guessing a confidence level is not.
+    """
     obs = [{"sequence": "T2", "finding": "ok", "location": "ok", "confidence": None}]
     clean, dropped = filter_hallucinated_observations(obs, SOURCES)
-    assert clean == obs
-    assert dropped == 0
+    assert clean == []
+    assert dropped == 1
 
 
-def test_missing_fields_do_not_crash():
+def test_missing_fields_are_dropped_not_crashed_on():
     obs = [{"sequence": "T2"}]  # no finding/location/confidence at all
     clean, dropped = filter_hallucinated_observations(obs, SOURCES)
-    assert clean == obs
-    assert dropped == 0
+    assert clean == []
+    assert dropped == 1
 
 
 def test_empty_observations_list():
     assert filter_hallucinated_observations([], SOURCES) == ([], 0)
+
+
+# --- strict schema enforcement (required fields + confidence enum) ---------
+
+def test_missing_sequence_is_dropped():
+    obs = [{"finding": "real finding", "location": "brain", "confidence": "high"}]
+    clean, dropped = filter_hallucinated_observations(obs, SOURCES)
+    assert clean == []
+    assert dropped == 1
+
+
+def test_empty_string_location_is_dropped():
+    obs = [{"sequence": "T2", "finding": "real finding", "location": "   ",
+           "confidence": "high"}]
+    clean, dropped = filter_hallucinated_observations(obs, SOURCES)
+    assert clean == []
+    assert dropped == 1
+
+
+def test_unrecognized_confidence_value_is_dropped():
+    obs = [{"sequence": "T2", "finding": "real finding", "location": "brain",
+           "confidence": "uncertain"}]
+    clean, dropped = filter_hallucinated_observations(obs, SOURCES)
+    assert clean == []
+    assert dropped == 1
+
+
+def test_confidence_is_case_insensitive():
+    obs = [{"sequence": "T2", "finding": "real finding", "location": "brain",
+           "confidence": "Moderate"}]
+    clean, dropped = filter_hallucinated_observations(obs, SOURCES)
+    assert clean == obs
+    assert dropped == 0

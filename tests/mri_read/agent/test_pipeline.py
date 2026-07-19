@@ -89,3 +89,53 @@ def test_host_not_injected_for_non_ollama_engine():
 
     _, kwargs = mock_get_engine.call_args
     assert "host" not in kwargs
+
+
+# --- hallucination guard wiring ----------------------------------------------
+
+def test_uncorroborated_concerning_observation_is_suppressed_end_to_end():
+    from mri_read.agent.guard import REDACTED_FINDING
+
+    concerning_obs = [{"sequence": "T2", "finding": "this appears to be a tumor",
+                       "location": "frontal lobe", "confidence": "high"}]
+    fake_vision_result = AnalysisResult(engine="ollama:llava", sequences_reviewed=["T2"],
+                                        observations=concerning_obs)
+    with patch("mri_read.agent.pipeline.get_engine") as mock_get_engine, \
+         patch("mri_read.agent.pipeline.ensure_model", return_value="meditron:7b"), \
+         patch("mri_read.agent.pipeline._synthesize",
+              return_value={"impression": "See observations.", "flags": []}):
+        mock_get_engine.return_value.analyze.return_value = fake_vision_result
+        _, ctx = run_agent()
+
+    assert ctx.last_result.observations[0]["finding"] == REDACTED_FINDING
+    assert any("suppressed" in f for f in ctx.last_result.flags)
+
+
+def test_unsupported_claim_in_synthesized_impression_is_redacted_end_to_end():
+    fake_vision_result = AnalysisResult(engine="ollama:llava", sequences_reviewed=["T2"])
+    with patch("mri_read.agent.pipeline.get_engine") as mock_get_engine, \
+         patch("mri_read.agent.pipeline.ensure_model", return_value="meditron:7b"), \
+         patch("mri_read.agent.pipeline._synthesize",
+              return_value={"impression": "Findings suggest a possible tumor.", "flags": []}):
+        mock_get_engine.return_value.analyze.return_value = fake_vision_result
+        _, ctx = run_agent()
+
+    assert "tumor" not in ctx.last_result.impression.lower()
+    assert "[unconfirmed finding]" in ctx.last_result.impression
+    assert ctx.last_result.confidence == "low"
+
+
+def test_clean_report_gets_a_computed_confidence():
+    clean_obs = [{"sequence": "T2", "finding": "no abnormality", "location": "n/a",
+                 "confidence": "high"}]
+    fake_vision_result = AnalysisResult(engine="ollama:llava", sequences_reviewed=["T2"],
+                                        observations=clean_obs)
+    with patch("mri_read.agent.pipeline.get_engine") as mock_get_engine, \
+         patch("mri_read.agent.pipeline.ensure_model", return_value="meditron:7b"), \
+         patch("mri_read.agent.pipeline._synthesize",
+              return_value={"impression": "No acute findings.", "flags": []}):
+        mock_get_engine.return_value.analyze.return_value = fake_vision_result
+        _, ctx = run_agent()
+
+    assert ctx.last_result.confidence == "high"
+    assert ctx.last_result.impression == "No acute findings."

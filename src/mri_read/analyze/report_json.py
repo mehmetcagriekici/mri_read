@@ -14,6 +14,7 @@ def write_json(result, study_meta: dict) -> None:
         "sequences_reviewed": result.sequences_reviewed,
         "observations": result.observations,
         "impression": result.impression,
+        "confidence": result.confidence,
         "flags": result.flags,
         "disclaimer": result.disclaimer,
     }, indent=2))

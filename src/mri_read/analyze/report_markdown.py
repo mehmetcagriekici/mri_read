@@ -15,6 +15,7 @@ def write_markdown(result, study_meta: dict) -> None:
         f"@ {study_meta.get('field_T')}T",
         f"**Engine:** {result.engine}",
         f"**Sequences reviewed:** {', '.join(result.sequences_reviewed)}",
+        f"**Overall confidence:** {result.confidence or '_(not computed)_'}",
         "",
         "## Impression",
         "",

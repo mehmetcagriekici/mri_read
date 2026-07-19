@@ -1,4 +1,5 @@
-from mri_read.engine import AnalysisResult, SeriesImages
+from mri_read.engine import (CONFIDENCE_LEVELS, AnalysisResult, SeriesImages,
+                             normalize_confidence)
 
 
 def test_series_images_holds_given_fields():
@@ -14,9 +15,29 @@ def test_analysis_result_defaults():
     r = AnalysisResult(engine="ollama:llava", sequences_reviewed=["T2"])
     assert r.observations == []
     assert r.impression == ""
+    assert r.confidence == ""
     assert r.flags == []
     assert r.disclaimer == ""
     assert r.raw is None
+
+
+def test_normalize_confidence_accepts_known_levels_case_insensitively():
+    assert normalize_confidence("low") == "low"
+    assert normalize_confidence("Moderate") == "moderate"
+    assert normalize_confidence("HIGH") == "high"
+    assert normalize_confidence("  high  ") == "high"
+
+
+def test_normalize_confidence_rejects_unknown_values():
+    assert normalize_confidence("uncertain") is None
+    assert normalize_confidence("low|moderate|high") is None
+    assert normalize_confidence("") is None
+    assert normalize_confidence(None) is None
+    assert normalize_confidence(3) is None
+
+
+def test_confidence_levels_are_exactly_low_moderate_high():
+    assert CONFIDENCE_LEVELS == ("low", "moderate", "high")
 
 
 def test_analysis_result_default_lists_are_independent_per_instance():

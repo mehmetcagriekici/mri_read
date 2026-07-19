@@ -8,6 +8,24 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+# The only confidence values an observation or the overall report is allowed
+# to carry. Anything else (a placeholder echo like "low|moderate|high", a
+# missing value, free text) doesn't normalize and should be treated as
+# untrustworthy by the caller, not defaulted to a guess.
+CONFIDENCE_LEVELS = ("low", "moderate", "high")
+
+
+def normalize_confidence(value: object) -> str | None:
+    """Normalize a free-form confidence value to one of CONFIDENCE_LEVELS.
+
+    Returns None (not a default) when it doesn't map cleanly -- silence is
+    an acceptable outcome here, a guessed confidence level is not.
+    """
+    if not isinstance(value, str):
+        return None
+    v = value.strip().lower()
+    return v if v in CONFIDENCE_LEVELS else None
+
 
 @dataclass
 class SeriesImages:
@@ -34,6 +52,8 @@ class AnalysisResult:
     sequences_reviewed: list[str]
     observations: list[dict] = field(default_factory=list)  # {sequence,finding,location,confidence}
     impression: str = ""                            # short overall summary
+    confidence: str = ""                            # overall confidence: one of CONFIDENCE_LEVELS,
+                                                      # or "" when not computed (e.g. no guard ran)
     flags: list[str] = field(default_factory=list)  # caveats / limitations
     disclaimer: str = ""
     raw: dict | None = None                         # engine-specific, for debugging

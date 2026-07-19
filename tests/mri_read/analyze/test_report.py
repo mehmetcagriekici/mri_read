@@ -9,7 +9,8 @@ def _result():
         engine="ollama:llava", sequences_reviewed=["T2", "T2 FLAIR"],
         observations=[{"sequence": "T2", "finding": "normal", "location": "n/a",
                       "confidence": "high"}],
-        impression="No acute findings.", flags=["low-snr on Seri9"],
+        impression="No acute findings.", confidence="high",
+        flags=["low-snr on Seri9"],
         disclaimer="Research prototype only.",
     )
 
@@ -27,6 +28,7 @@ def test_report_json_round_trips_result_fields(out_dir):
     data = json.loads((out_dir / "report.json").read_text())
     assert data["engine"] == "ollama:llava"
     assert data["impression"] == "No acute findings."
+    assert data["confidence"] == "high"
     assert data["flags"] == ["low-snr on Seri9"]
     assert data["study"]["body_part"] == "BRAIN"
 
@@ -37,9 +39,19 @@ def test_report_markdown_contains_key_sections(out_dir):
     md = (out_dir / "report.md").read_text()
     assert "# MRI Analysis Report" in md
     assert "No acute findings." in md
+    assert "**Overall confidence:** high" in md
     assert "## Observations" in md
     assert "## Flags" in md
     assert "low-snr on Seri9" in md
+
+
+def test_report_markdown_shows_placeholder_when_confidence_not_computed(out_dir):
+    result = AnalysisResult(engine="ollama:llava", sequences_reviewed=[],
+                            impression="", disclaimer="x")  # confidence left at default ""
+    write_report(result, {})
+
+    md = (out_dir / "report.md").read_text()
+    assert "**Overall confidence:** _(not computed)_" in md
 
 
 def test_report_markdown_handles_no_observations_or_flags(out_dir):

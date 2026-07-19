@@ -25,11 +25,23 @@ Flow, every step always runs (no model can skip one):
      medical-domain fine-tune) reads the manifest + QC + step-3 findings —
      never the images themselves — and writes the final concise impression.
      This is one-shot: no tool-calling support is required for this model.
+  5. guard.py's two deterministic passes -- no model call, so this step
+     can't itself hallucinate. Between steps 3 and 4, apply_correlation_guard()
+     suppresses any vision observation asserting a diagnostic-sounding claim
+     (tumor, malignancy, ...) that no OTHER sequence corroborates, replacing
+     the claim text outright rather than just flagging it -- a caveat next to
+     "tumor" is too easy to miss. After step 4, guard_final_impression() runs
+     the same check against the synthesized prose, and cross-checks it
+     doesn't discuss a sequence that was never actually analyzed. Confidence
+     is never trusted from a model self-report; it's computed by this guard
+     from what actually survived both passes.
 
 Layout:
   context.py   : AgentContext/PipelineError, state handed back to the CLI.
   prompts.py   : SYNTH_SYSTEM, the text-reasoning model's system prompt.
   synthesis.py : _synthesize(), the one-shot text-reasoning call.
+  guard.py     : apply_correlation_guard()/guard_final_impression(), the
+                 deterministic hallucination guard (see step 5 above).
   pipeline.py  : run_agent(), wiring the whole flow together.
 
 CLI entry point: src/cmd/agent.py
