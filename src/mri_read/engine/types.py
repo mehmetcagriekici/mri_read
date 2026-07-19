@@ -39,6 +39,9 @@ class SeriesImages:
     plane: str                    # Axial / Coronal / Sagittal
     slice_indices: list[int]      # which slice numbers were chosen
     slice_pngs: list[bytes]       # PNG bytes, one per chosen slice
+    acq: dict = field(default_factory=dict)  # manifest row's acquisition params
+                                             # (TE/TR/TI/thickness_mm/scanning_sequence),
+                                             # e.g. for a vision prompt to reason with
 
 
 @dataclass

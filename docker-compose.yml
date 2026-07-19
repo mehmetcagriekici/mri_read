@@ -35,7 +35,7 @@ services:
       - ollama
     environment:
       OLLAMA_HOST: http://ollama:11434
-      OLLAMA_MODEL: llava:13b            # vision engine — reads the images
+      OLLAMA_MODEL: qwen2.5vl:7b          # vision engine — reads the images
       OLLAMA_AGENT_MODEL: meditron:7b    # text-reasoning — synthesizes the final report
     volumes:
       - ./mri_test_data:/app/mri_test_data:ro   # data stays read-only

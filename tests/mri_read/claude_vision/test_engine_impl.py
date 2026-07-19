@@ -78,3 +78,32 @@ def test_analyze_tolerates_malformed_json_reply(fake_anthropic_module):
     result = engine.analyze({}, series)
 
     assert "unparsed" in result.flags
+
+
+def test_format_acq_renders_present_values():
+    from mri_read.claude_vision.engine_impl import _format_acq
+    assert _format_acq({"TE": 96.36, "TR": 8200.0}) == " Acquisition: TE=96.36ms, TR=8200.0ms."
+
+
+def test_format_acq_empty_when_nothing_present():
+    from mri_read.claude_vision.engine_impl import _format_acq
+    assert _format_acq({}) == ""
+
+
+def test_analyze_includes_acq_params_in_the_sequence_label(fake_anthropic_module):
+    from mri_read.claude_vision.engine_impl import ClaudeVisionEngine
+
+    fake_client = fake_anthropic_module.Anthropic.return_value
+    fake_client.messages.create.return_value = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text='{"impression": "ok"}')])
+
+    engine = ClaudeVisionEngine()
+    series = [SeriesImages("Seri6", "T2 FLAIR", "Axial", [0], [b"png1"],
+                          acq={"TE": 96.36, "TR": 8200.0, "TI": 2376.04})]
+    engine.analyze({}, series)
+
+    content = fake_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    label_block = next(b for b in content if b["type"] == "text" and "T2 FLAIR" in b["text"])
+    assert "TE=96.36ms" in label_block["text"]
+    assert "TR=8200.0ms" in label_block["text"]
+    assert "TI=2376.04ms" in label_block["text"]

@@ -30,15 +30,38 @@ DEFAULT_MODEL = CFG.vision_model
 MAX_REPLY_TOKENS = 768
 
 
+def _format_acq(acq: dict) -> str:
+    """Render TE/TR/TI as a short "Acquisition: ..." line, or "" if none of
+    them are present -- lets the model reason about the actual sequence
+    weighting (e.g. long TE+TR -> T2, IR+long TE -> FLAIR) instead of only
+    the label we've already inferred it as.
+    """
+    parts = []
+    for key, name in (("TE", "TE"), ("TR", "TR"), ("TI", "TI")):
+        value = acq.get(key)
+        if value is not None:
+            parts.append(f"{name}={value}ms")
+    return f"Acquisition: {', '.join(parts)}.\n" if parts else ""
+
+
 class OllamaVisionEngine(AnalysisEngine):
     name = "ollama"
 
     def __init__(self, model: str = DEFAULT_MODEL, host: str = DEFAULT_HOST,
-                 timeout: int = 600, auto_pull: bool = True):
+                 timeout: int = 1500, auto_pull: bool = True):
         # host normalized (no trailing slash). timeout is PER SERIES CALL (see
         # analyze()) — one call per sequence type, not one call for the whole
         # study, so this only needs to cover a handful of images on CPU, not
         # every selected series' slices at once.
+        #
+        # 1500s (was 600s under llava:13b): measured directly on this machine
+        # with qwen2.5vl:7b (the current default) -- a SINGLE real image took
+        # 169-232s depending on size (dominated by Ollama's --image-min-tokens
+        # 1024 floor, not much affected by actual resolution). A real call
+        # sends 4 images in one combined prompt, extrapolating to roughly
+        # 700-950s+ before generation even starts. 600s was already too low
+        # for this model; 1500s gives real margin above the estimate rather
+        # than guessing a number nobody measured.
         self.model = model
         self.host = host.rstrip("/")
         self.timeout = timeout
@@ -62,6 +85,7 @@ class OllamaVisionEngine(AnalysisEngine):
             f"{study_meta.get('model')} at {study_meta.get('field_T')}T.\n"
             f"=== {s.label} ({s.plane}, {s.series}) — "
             f"slice indices {s.slice_indices} ===\n"
+            f"{_format_acq(s.acq)}"
             "Now return ONLY the JSON described in the system prompt, "
             "scoped to this one sequence."
         )

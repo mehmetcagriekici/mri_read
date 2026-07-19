@@ -12,19 +12,20 @@ from mri_read.mri import load_series
 def _dwi_images(row: dict, slices: int) -> list[SeriesImages]:
     """DWI gets special treatment: high-b stack (+ ADC map when computable)."""
     v = diffusion_views(row["series"])
+    acq = row.get("acq") or {}
     out = []
     if v["high_b"] is not None:
         vol = v["high_b"]
         idx = content_indices(vol, slices)
         blabel = f"DWI (b={v['b_value']})" if v["b_value"] else "DWI"
         out.append(SeriesImages(row["series"], blabel, row.get("plane", "?"),
-                                idx, volume_to_pngs(vol, idx)))
+                                idx, volume_to_pngs(vol, idx), acq=acq))
     if v["adc"] is not None:
         vol = v["adc"]
         idx = content_indices(vol, slices)
         out.append(SeriesImages(row["series"], "DWI ADC map",
                                 row.get("plane", "?"), idx,
-                                volume_to_pngs(vol, idx)))
+                                volume_to_pngs(vol, idx), acq=acq))
     return out
 
 
@@ -43,4 +44,7 @@ def build_series_images(row: dict, slices: int) -> list[SeriesImages]:
         # ran on this series (the normal agent/analyze flow), this reuses
         # its computation instead of recomputing the same percentile pass.
         slice_pngs=volume_to_pngs(s.volume, idx, bounds=s.window_bounds),
+        # TE/TR/TI etc, so the vision prompt can reason with the actual
+        # acquisition parameters instead of only the sequence label.
+        acq=row.get("acq") or {},
     )]

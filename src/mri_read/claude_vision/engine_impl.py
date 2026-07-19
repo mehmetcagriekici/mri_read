@@ -13,6 +13,18 @@ from mri_read.ollama_client import parse_json_reply
 DEFAULT_MODEL = "claude-sonnet-5"
 
 
+def _format_acq(acq: dict) -> str:
+    """Render TE/TR/TI as a short "Acquisition: ..." line, or "" if none of
+    them are present. See ollama_vision.engine_impl's identical helper.
+    """
+    parts = []
+    for key in ("TE", "TR", "TI"):
+        value = acq.get(key)
+        if value is not None:
+            parts.append(f"{key}={value}ms")
+    return f" Acquisition: {', '.join(parts)}." if parts else ""
+
+
 class ClaudeVisionEngine(AnalysisEngine):
     name = "claude-vision"
 
@@ -45,7 +57,7 @@ class ClaudeVisionEngine(AnalysisEngine):
             content.append({                         # label for this sequence
                 "type": "text",
                 "text": f"\n=== {s.label} ({s.plane}, {s.series}) — "
-                        f"slice indices {s.slice_indices} ===",
+                        f"slice indices {s.slice_indices} ==={_format_acq(s.acq)}",
             })
             for png in s.slice_pngs:                 # then its slice images
                 content.append({

@@ -27,7 +27,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class Config:
     ollama_host: str = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-    vision_model: str = os.environ.get("OLLAMA_MODEL", "llava:13b")
+    vision_model: str = os.environ.get("OLLAMA_MODEL", "qwen2.5vl:7b")
     agent_model: str = os.environ.get("OLLAMA_AGENT_MODEL", "meditron:7b")
 
 

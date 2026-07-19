@@ -13,12 +13,13 @@ from unittest.mock import patch
 import pytest
 
 from mri_read.engine import SeriesImages
-from mri_read.ollama_vision.engine_impl import OllamaVisionEngine
+from mri_read.ollama_vision.engine_impl import OllamaVisionEngine, _format_acq
 
 
-def _series(label: str, series: str = "Seri1") -> SeriesImages:
+def _series(label: str, series: str = "Seri1", acq: dict | None = None) -> SeriesImages:
     return SeriesImages(series=series, label=label, plane="Axial",
-                        slice_indices=[1, 2], slice_pngs=[b"png1", b"png2"])
+                        slice_indices=[1, 2], slice_pngs=[b"png1", b"png2"],
+                        acq=acq or {})
 
 
 @pytest.fixture
@@ -49,6 +50,44 @@ def test_analyze_one_forwards_configured_timeout_to_post(engine):
               return_value={"message": {"content": "{}"}}) as mock_post:
         engine._analyze_one({}, _series("T2"))
     assert mock_post.call_args[0][-1] == 42  # post(host, path, payload, timeout)
+
+
+# --- acquisition parameters (TE/TR/TI) in the prompt --------------------
+
+def test_format_acq_renders_present_values():
+    assert _format_acq({"TE": 96.36, "TR": 8200.0, "TI": 2376.04}) == (
+        "Acquisition: TE=96.36ms, TR=8200.0ms, TI=2376.04ms.\n"
+    )
+
+
+def test_format_acq_skips_missing_values():
+    assert _format_acq({"TE": 90.24, "TR": None}) == "Acquisition: TE=90.24ms.\n"
+
+
+def test_format_acq_empty_when_nothing_present():
+    assert _format_acq({}) == ""
+    assert _format_acq({"TE": None, "TR": None, "TI": None}) == ""
+
+
+def test_analyze_one_includes_acq_params_in_the_user_message(engine):
+    series = _series("T2 FLAIR", acq={"TE": 96.36, "TR": 8200.0, "TI": 2376.04})
+    with patch("mri_read.ollama_vision.engine_impl.post",
+              return_value={"message": {"content": "{}"}}) as mock_post:
+        engine._analyze_one({}, series)
+
+    user_content = mock_post.call_args[0][2]["messages"][1]["content"]
+    assert "TE=96.36ms" in user_content
+    assert "TR=8200.0ms" in user_content
+    assert "TI=2376.04ms" in user_content
+
+
+def test_analyze_one_omits_acquisition_line_when_no_acq_data(engine):
+    with patch("mri_read.ollama_vision.engine_impl.post",
+              return_value={"message": {"content": "{}"}}) as mock_post:
+        engine._analyze_one({}, _series("T2"))  # no acq given
+
+    user_content = mock_post.call_args[0][2]["messages"][1]["content"]
+    assert "Acquisition:" not in user_content
 
 
 def test_analyze_one_caps_reply_length():

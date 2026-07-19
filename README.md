@@ -102,7 +102,8 @@ python src/cmd/agent.py --model meditron:7b --engine ollama --vision-model llava
 ```
 
 Two different local models are involved, each doing only what it's suited
-for: a **vision** model (`OLLAMA_MODEL`, default `llava:13b`) reads the
+for: a **vision** model (`OLLAMA_MODEL`, default `qwen2.5vl:7b` — switched
+from `llava:13b`; see the Performance section below for why) reads the
 images and reports structured per-sequence findings; a separate **text**
 model (`OLLAMA_AGENT_MODEL`, default `meditron:7b` — a local medical-domain
 fine-tune) reads the deterministic manifest/QC data plus those findings and
@@ -125,48 +126,100 @@ in a new file and register it in `get_engine()` — nothing else changes.
 ### Performance: CPU-only vision inference is slow — read this if a run seems stuck
 
 **If `agent.py` appears to hang or times out, this is very likely why, and it's
-not a bug.** Measured on this project's own CPU-only dev machine: a single
-per-series vision call to `llava:13b` (4 images) took **434.6 seconds** — over
-7 minutes — for one sequence. `run_agent()` makes one such call per selected
-sequence type (typically 5: DWI, T1(IR), T2, T2 FLAIR, 3D T1), so a full run's
-vision-analysis phase alone can cost **30-40+ minutes** before text-synthesis
-even starts. The default `--vision-timeout` (600s) is close enough to that
-measured number that ordinary variance (more images, system load, a longer
-reply) can genuinely exceed it. This is inherent to running a 13B-parameter
-vision-language model on hardware with no GPU — not something a code fix
-resolves.
+not a bug.** Measured on this project's own CPU-only dev machine with the
+*original* default, `llava:13b`: a single per-series vision call (4 images)
+took **434.6 seconds** — over 7 minutes — for one sequence. `run_agent()`
+makes one such call per selected sequence type (typically 5: DWI, T1(IR), T2,
+T2 FLAIR, 3D T1), so a full run's vision-analysis phase alone could cost
+**30-40+ minutes** before text-synthesis even starts, and the default
+`--vision-timeout` (600s) was close enough to that measured number that
+ordinary variance (more images, system load, a longer reply) genuinely
+exceeded it. This is inherent to running a vision-language model on hardware
+with no GPU — not something a code fix alone resolves.
+
+Two more things confirmed by digging into a real stuck run: (1) `llava:13b`'s
+vision tower was `CLIP-ViT-L/14-336` — a **fixed 336×336** input resolution,
+architecturally incapable of using anything beyond that no matter what size
+image you send it (this project sends full-resolution slices, e.g.
+1024×1024, which were being silently downsampled by the model anyway — pure
+wasted transfer/decode cost, not a source of lost detail, since the model was
+never going to see more than 336×336 in the first place). (2) Neither vision
+nor synthesis call originally bounded reply length (`num_predict`); a
+generation that never reaches a natural stop token has no cap other than the
+context window, and since Ollama here runs a single processing slot (`-np
+1`), one stuck generation blocks every subsequent series from ever being
+served — explaining a run where ALL FIVE series time out, not just a slow
+one. The `num_predict` cap is now fixed in code regardless of model (see
+`CLAUDE.md`'s Performance section); the fixed-336-resolution problem is
+addressed by switching the default to `qwen2.5vl:7b`, below.
+
+**Current default is `qwen2.5vl:7b`, not `llava:13b`.** `llava:13b`'s
+CLIP-336 ceiling meant this project was sending 1024×1024 images for zero
+benefit; `qwen2.5vl` uses native dynamic resolution instead of a fixed crop,
+so it can actually use more of what's sent — but that cuts both ways:
+unlike `llava`, oversized input to `qwen2.5vl` isn't free-and-discarded, it's
+*more compute*. Measured directly on this machine: a **single** real image
+took **169-232s** depending on size — dominated by Ollama's
+`--image-min-tokens 1024` floor (a 256×256 image already cost ~1049 tokens;
+a 1024×1024 one cost ~1394, not a proportional 16x increase) rather than
+actual resolution. A real call sends 4 images in one combined prompt, so
+this is *worse* per-image than `llava:13b` was, not better —
+`OllamaVisionEngine`'s default `--vision-timeout` is 1500s (up from 600s)
+specifically to give this model's real measured cost some margin, not a
+guess. If you don't want to resize/otherwise touch the image data (this
+project's own preference, since `--image-min-tokens` makes resizing
+unlikely to help much anyway — see `CLAUDE.md`), the two levers that don't
+touch image content are the timeout (already raised) and `--slices` (item 4
+below).
 
 What actually helps, roughly in order of impact:
 
 1. **Use a GPU if you have one.** By far the biggest lever — CPU inference on
    a model this size is the whole problem. If Ollama can see a GPU, point
-   `OLLAMA_HOST` at that instance instead of a CPU-only one.
-2. **Use a smaller/faster vision model** if you're stuck on CPU. `llava:13b`
-   is the default because it was already available in this project's dev
-   environment, not because it's the fastest reasonable choice — try:
+   `OLLAMA_HOST` at that instance instead of a CPU-only one. With a GPU, much
+   larger/more capable models become practical — worth trying instead of a
+   small CPU-oriented one:
    ```bash
-   python src/cmd/agent.py --vision-model llava:7b       # same family, ~half the params
-   python src/cmd/agent.py --vision-model qwen2.5vl:7b    # already referenced elsewhere in this repo
-   python src/cmd/agent.py --vision-model moondream       # much smaller/faster, lower quality
+   python src/cmd/agent.py --vision-model qwen2.5vl:32b     # bigger version of the current default
+   python src/cmd/agent.py --vision-model llama3.2-vision:90b
+   python src/cmd/agent.py --vision-model llava:34b         # same CLIP-336 ceiling as llava:13b, just a bigger LLM half
    ```
-   Smaller models trade off analysis quality for speed — for a research
-   prototype that's often the right trade, but re-check output quality (see
-   the `flags`/`observations` in `output/report.md`) before assuming a faster
-   model is "good enough."
-3. **Raise the timeouts** if you're keeping the default (or another large)
-   model — 600s/900s were reasonable-looking defaults before this was
-   measured; they're close to the actual latency, not comfortably above it:
+   (Availability/exact tags depend on what's current in Ollama's library —
+   check `ollama pull <name>` works before wiring it in.)
+2. **If `qwen2.5vl:7b` is still too slow on CPU**, `llava:7b`/`bakllava`/
+   `llava-phi3` are all CLIP-336 under the hood (same "resolution above 336
+   is wasted" property `llava:13b` had — smaller only helps the
+   language-model half, not vision encoding) but meaningfully smaller;
+   `minicpm-v` is architecturally closer to `qwen2.5vl` (adapts to the
+   image rather than the image adapting to a fixed crop) and built
+   specifically for efficient/edge deployment:
    ```bash
-   python src/cmd/agent.py --vision-timeout 1200 --synth-timeout 1200
+   python src/cmd/agent.py --vision-model llava:7b        # smaller, fixed-336 tradeoff
+   python src/cmd/agent.py --vision-model minicpm-v        # built for efficient/edge (CPU) deployment, adaptive high-res handling
+   python src/cmd/agent.py --vision-model moondream       # smallest/fastest of the bunch, but back to a fairly fixed internal resolution
+   ```
+   None of these are pulled by default in this project's dev environment, and
+   compatibility with a given Ollama version isn't guaranteed —
+   `llama3.2-vision` (`mllama` architecture) is already known NOT to work on
+   the Ollama version this was developed against; verify a new model
+   actually loads and responds before relying on it. Smaller/different models
+   also trade off analysis quality for speed — re-check the
+   `flags`/`observations` in `output/report.md` before assuming a faster
+   model is "good enough."
+3. **Raise the timeouts further if 1500s/900s still isn't enough.** Those are
+   the current defaults (vision/synthesis respectively) — already raised
+   once based on real measurement, not a starting guess — but a slower
+   machine or a heavier model swap may still need more:
+   ```bash
+   python src/cmd/agent.py --vision-timeout 2400 --synth-timeout 1200
    ```
 4. **Reduce `--slices`** (default 4) to cut per-call image count, e.g.
    `--slices 2` — fewer images per call means less compute per call, at the
    cost of a coarser look at each sequence.
 
-See `CLAUDE.md`'s Performance section for the full measured cost breakdown,
-including two smaller code-level fixes (deduped a redundant windowing
-computation, added a stall timeout to model pulls) that were real but small
-next to vision-call latency itself.
+See `CLAUDE.md`'s Performance section for the full measured cost breakdown
+and code-level fixes (deduped windowing computation, stall timeout on model
+pulls, reply-length cap, and the 336×336 finding above).
 
 ## Running pipeline stages individually (development / debugging)
 

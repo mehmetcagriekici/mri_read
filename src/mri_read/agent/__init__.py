@@ -19,8 +19,8 @@ Flow, every step always runs (no model can skip one):
      analyze._rank_key -- e.g. the DWI folder with more b-values, the
      thinnest 3D T1, the cleanest QC/SNR for everything else) -- the same
      building blocks analyze.py uses, so slice selection/windowing isn't
-     duplicated. The vision model (OLLAMA_MODEL, default llava:13b) reads the
-     images and returns structured per-sequence observations.
+     duplicated. The vision model (OLLAMA_MODEL, default qwen2.5vl:7b) reads
+     the images and returns structured per-sequence observations.
   4. A separate TEXT-reasoning model (OLLAMA_AGENT_MODEL, default a local
      medical-domain fine-tune) reads the manifest + QC + step-3 findings —
      never the images themselves — and writes the final concise impression.

@@ -35,8 +35,11 @@ def main() -> None:
                     help="override the vision engine's model")
     ap.add_argument("--vision-timeout", type=int, default=None,
                     help="seconds to wait for EACH per-series vision call (one "
-                         "call per sequence type, default 600; raise this on "
-                         "slow CPU-only setups if you see a socket TimeoutError)")
+                         "call per sequence type, default 1500 for the default "
+                         "qwen2.5vl:7b -- measured 169-232s for a SINGLE image "
+                         "on this project's CPU-only dev machine, and a call "
+                         "sends 4; raise further on slower setups if you see a "
+                         "socket TimeoutError)")
     ap.add_argument("--slices", type=int, default=4,
                     help="slices per series handed to the vision engine (default 4)")
     ap.add_argument("--skip-qc-warn", action="store_true",

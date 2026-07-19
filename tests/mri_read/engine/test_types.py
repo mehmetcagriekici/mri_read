@@ -11,6 +11,26 @@ def test_series_images_holds_given_fields():
     assert s.slice_pngs == [b"a", b"b"]
 
 
+def test_series_images_acq_defaults_to_empty_dict():
+    s = SeriesImages(series="Seri1", label="T2", plane="Axial",
+                     slice_indices=[1], slice_pngs=[b"a"])
+    assert s.acq == {}
+
+
+def test_series_images_acq_holds_given_value():
+    s = SeriesImages(series="Seri1", label="T2", plane="Axial",
+                     slice_indices=[1], slice_pngs=[b"a"],
+                     acq={"TE": 90.24, "TR": 7163.0})
+    assert s.acq == {"TE": 90.24, "TR": 7163.0}
+
+
+def test_series_images_acq_is_independent_per_instance():
+    a = SeriesImages(series="a", label="T2", plane="Axial", slice_indices=[], slice_pngs=[])
+    b = SeriesImages(series="b", label="T2", plane="Axial", slice_indices=[], slice_pngs=[])
+    a.acq["TE"] = 1.0
+    assert b.acq == {}
+
+
 def test_analysis_result_defaults():
     r = AnalysisResult(engine="ollama:llava", sequences_reviewed=["T2"])
     assert r.observations == []
