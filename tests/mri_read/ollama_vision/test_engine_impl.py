@@ -85,3 +85,52 @@ def test_malformed_json_reply_degrades_to_unparsed_flag_not_a_crash(engine):
         result = engine.analyze({}, [_series("T2")])
 
     assert "unparsed" in result.flags
+
+
+def test_malformed_reply_does_not_leak_raw_text_as_impression(engine):
+    """A hallucinated reply that fails to parse must not surface verbatim in
+    the report -- see agent.synthesis' matching regression test for the real
+    incident this covers (a fake patient-record schema landed in a report).
+    """
+    with patch("mri_read.ollama_vision.engine_impl.post",
+              return_value={"message": {"content":
+                  '{"patient": {"first_name": "John"}, "second": 00}'}}):
+        result = engine.analyze({}, [_series("T2")])
+
+    assert "John" not in result.impression
+    assert result.raw["Seri1"]["impression"] == "unknown"
+
+
+def test_ground_truth_label_used_even_when_model_self_reports_wrong_sequence(engine):
+    """Regression test for a real incident: a call scoped to a T2 series got
+    a reply self-reporting "sequences_reviewed": ["T2 FLAIR"] -- the wrong
+    sequence -- which silently made T2 vanish from the report with no
+    failure flag, its real finding merged under T2 FLAIR instead. s.label
+    (what was actually sent) must always win over the model's self-report.
+    """
+    mislabeled_reply = {"message": {"content":
+        '{"sequences_reviewed": ["T2 FLAIR"], '
+        '"observations": [{"sequence": "T2 FLAIR", "finding": "real finding", '
+        '"location": "frontal lobe", "confidence": "moderate"}], '
+        '"impression": "ok", "flags": []}'}}
+
+    with patch("mri_read.ollama_vision.engine_impl.post", return_value=mislabeled_reply):
+        result = engine.analyze({}, [_series("T2", series="Seri3")])
+
+    assert result.sequences_reviewed == ["T2"]          # ground truth, not "T2 FLAIR"
+    assert result.observations[0]["sequence"] == "T2"   # corrected, not the model's claim
+    assert result.observations[0]["finding"] == "real finding"  # content preserved
+
+
+def test_placeholder_echo_observation_is_dropped_and_flagged(engine):
+    reply_with_echo = {"message": {"content":
+        '{"sequences_reviewed": ["T2 FLAIR"], '
+        '"observations": [{"sequence": "T2 FLAIR", "finding": "...", '
+        '"location": "...", "confidence": "low|moderate|high"}], '
+        '"impression": "ok", "flags": []}'}}
+
+    with patch("mri_read.ollama_vision.engine_impl.post", return_value=reply_with_echo):
+        result = engine.analyze({}, [_series("T2 FLAIR")])
+
+    assert result.observations == []
+    assert any("dropped" in f and "hallucinated" in f for f in result.flags)

@@ -46,6 +46,12 @@ def _synthesize(model: str, host: str, study_meta: dict, manifest: dict,
     try:
         synth = parse_json_reply(text)
     except (ValueError, IndexError):                    # malformed/non-JSON model reply
-        return {"impression": text, "flags": ["unparsed"]}
+        # Don't surface the raw reply as the "impression" -- a model that
+        # fails to follow the JSON contract has been observed dumping
+        # unrelated hallucinated content here (e.g. a fake patient-record
+        # schema), which would otherwise land verbatim in the final report
+        # looking like real analysis. "unknown" makes the failure visible
+        # instead of silently passing garbage through.
+        return {"impression": "unknown", "flags": ["unparsed"]}
     synth["flags"] = synth.get("flags") or []           # tolerate an explicit null
     return synth

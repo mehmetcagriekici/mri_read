@@ -9,6 +9,7 @@ from mri_read.config import DEFAULT as CFG
 from mri_read.engine import AnalysisEngine, AnalysisResult, SeriesImages
 from mri_read.ollama_client import ensure_model, parse_json_reply, post
 from mri_read.ollama_vision.prompts import SYSTEM
+from mri_read.ollama_vision.sanitize import filter_hallucinated_observations
 
 logger = logging.getLogger(__name__)
 
@@ -43,15 +44,17 @@ class OllamaVisionEngine(AnalysisEngine):
         to finish reliably, and a slow/failed sequence no longer sinks the
         whole report.
         """
+        user_message = (
+            f"Study: {study_meta.get('body_part')} MRI on "
+            f"{study_meta.get('model')} at {study_meta.get('field_T')}T.\n"
+            f"=== {s.label} ({s.plane}, {s.series}) — "
+            f"slice indices {s.slice_indices} ===\n"
+            "Now return ONLY the JSON described in the system prompt, "
+            "scoped to this one sequence."
+        )
         messages = [
             {"role": "system", "content": SYSTEM},
-            {"role": "user", "content":
-                (f"Study: {study_meta.get('body_part')} MRI on "
-                 f"{study_meta.get('model')} at {study_meta.get('field_T')}T.\n"
-                 f"=== {s.label} ({s.plane}, {s.series}) — "
-                 f"slice indices {s.slice_indices} ===\n"
-                 "Now return ONLY the JSON described in the system prompt, "
-                 "scoped to this one sequence."),
+            {"role": "user", "content": user_message,
              # Ollama wants base64 strings (no data-URI prefix) in "images".
              "images": [base64.b64encode(p).decode() for p in s.slice_pngs]},
         ]
@@ -64,9 +67,26 @@ class OllamaVisionEngine(AnalysisEngine):
         }, self.timeout)
         text = resp.get("message", {}).get("content", "")
         try:
-            return parse_json_reply(text)
+            data = parse_json_reply(text)
         except (ValueError, IndexError):             # malformed/non-JSON model reply
-            return {"impression": text, "observations": [], "flags": ["unparsed"]}
+            # Same rationale as agent.synthesis._synthesize: don't pass the
+            # raw unparseable reply through as "impression" -- it can be
+            # hallucinated content unrelated to this series entirely.
+            return {"impression": "unknown", "observations": [], "flags": ["unparsed"]}
+
+        # The JSON can be well-formed and STILL be a hallucination: llava has
+        # been observed echoing its own prompt's example schema/formatting
+        # back as if it were a real observation (see sanitize.py). Catch
+        # that here, not just outright unparseable replies.
+        clean_observations, dropped = filter_hallucinated_observations(
+            data.get("observations", []), echo_sources=[SYSTEM, user_message])
+        data["observations"] = clean_observations
+        if dropped:
+            flags = list(data.get("flags") or [])
+            flags.append(f"{s.label}: dropped {dropped} hallucinated "
+                        "placeholder-echo observation(s)")
+            data["flags"] = flags
+        return data
 
     # --- engine interface (implements AnalysisEngine.analyze) ---
     def analyze(self, study_meta: dict,
@@ -93,8 +113,20 @@ class OllamaVisionEngine(AnalysisEngine):
                 errors.append(f"{s.label}: {e}")
                 flags.append(f"{s.label}: analysis failed ({e})")
                 continue
-            sequences_reviewed.extend(data.get("sequences_reviewed", [s.label]))
-            observations.extend(data.get("observations", []))
+            # s.label is ground truth: this call was scoped to exactly one
+            # series' images (see _analyze_one's per-series split), so what
+            # sequence it covered is never in question. The model has been
+            # observed self-reporting the WRONG sequence name in its own
+            # reply (e.g. a T2 call claiming "T2 FLAIR") -- trusting that
+            # self-report silently misattributed real findings to the wrong
+            # sequence and made the true sequence vanish from the report
+            # with no failure flag. Every observation from this call is
+            # force-tagged with s.label instead of whatever the model claims.
+            sequences_reviewed.append(s.label)
+            for obs in data.get("observations", []):
+                obs = dict(obs)
+                obs["sequence"] = s.label
+                observations.append(obs)
             if data.get("impression"):
                 impressions.append(f"{s.label}: {data['impression']}")
             flags.extend(data.get("flags") or [])
